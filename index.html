@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>System Design Handbook</title>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+  <meta name="description" content="A professional beginner-friendly System Design handbook: fundamentals, HLD, LLD, and 20 real-world case studies." />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css" />
+  <link rel="stylesheet" href="assets/custom.css" />
+</head>
+<body>
+  <div id="app">Loading handbook…</div>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'neutral',
+      securityLevel: 'loose',
+      flowchart: { htmlLabels: true, curve: 'basis' }
+    });
+
+    function renderMermaidDiagrams() {
+      if (!window.mermaid) return;
+
+      var blocks = document.querySelectorAll(
+        'pre[data-lang="mermaid"], pre code.lang-mermaid, pre code.language-mermaid'
+      );
+
+      blocks.forEach(function (node) {
+        var pre = node.tagName === 'CODE' ? node.parentElement : node;
+        if (!pre || pre.dataset.mermaidDone === '1') return;
+
+        var source = (node.tagName === 'CODE' ? node : pre.querySelector('code') || pre).textContent.trim();
+        var container = document.createElement('div');
+        container.className = 'mermaid';
+        container.textContent = source;
+        pre.replaceWith(container);
+      });
+
+      var diagrams = document.querySelectorAll('.mermaid:not([data-processed])');
+      if (!diagrams.length) return;
+
+      mermaid.run({ nodes: diagrams }).catch(function (err) {
+        console.error('Mermaid render error:', err);
+      });
+    }
+
+    window.$docsify = {
+      name: 'System Design',
+      nameLink: '#/',
+      loadSidebar: true,
+      subMaxLevel: 3,
+      coverpage: true,
+      onlyCover: false,
+      auto2top: true,
+      homepage: 'README.md',
+      themeColor: '#0f5c56',
+      search: {
+        maxAge: 86400000,
+        paths: 'auto',
+        placeholder: 'Search lessons…',
+        noData: 'No results',
+        depth: 4
+      },
+      pagination: {
+        previousText: 'Previous',
+        nextText: 'Next',
+        crossChapter: true,
+        crossChapterText: true
+      },
+      copyCode: {
+        buttonText: 'Copy',
+        errorText: 'Error',
+        successText: 'Copied'
+      },
+      plugins: [
+        function (hook) {
+          hook.doneEach(function () {
+            // Small delay so Docsify finishes injecting the HTML
+            setTimeout(renderMermaidDiagrams, 0);
+          });
+        }
+      ]
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify@4/lib/docsify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify@4/lib/plugins/search.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify-pagination/dist/docsify-pagination.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify-copy-code@2/dist/docsify-copy-code.min.js"></script>
+</body>
+</html>

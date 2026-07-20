@@ -1,0 +1,296 @@
+# Case Study 19 — Collaborative Document Editing (Google Docs–like)
+
+Design a simplified **real-time collaborative text editor** where multiple users edit the same document simultaneously and see each other's changes within seconds.
+
+## 1. Problem
+
+Two people edit the same document at once. If you simply send "replace entire file" updates, one person's edits overwrite the other's. You need a way to merge concurrent edits so everyone converges on the same final text without locking the whole document.
+
+## 2. Requirements
+
+### Functional (MVP)
+
+- Create/open/close documents  
+- Real-time text editing with cursor presence (who is online)  
+- Multiple users edit same doc concurrently  
+- Offline edits merge when user reconnects (simplified)  
+- Document persistence and load on open  
+- Basic auth: only invited users can edit  
+
+### Out of scope (initially)
+
+- Rich formatting (bold, images, comments) — plain text or minimal rich text  
+- Full Google Docs feature parity (suggest mode, version history UI)  
+- End-to-end encryption  
+- Mobile offline-first with complex conflict UI  
+
+### Non-functional
+
+- Latency: local edits feel instant (< 50 ms local); remote edits visible < 200 ms  
+- Correctness: all clients converge to identical document state  
+- Availability: editing works if one server dies (with replication)  
+- Scale: 10 concurrent editors per doc (typical); thousands of idle docs  
+
+## 3. Back-of-the-envelope estimates
+
+Assumptions:
+
+- 5M documents, average 10 KB text  
+- 50k concurrently open documents  
+- 5 editors/doc peak for hot docs, 1–2 average  
+- 10 ops/sec/editor (keystrokes + deletes)  
+
+```text
+Storage        ≈ 5M × 10 KB ≈ 50 GB text (+ snapshots)
+Hot doc QPS    ≈ 50k docs × 3 editors × 10 ops/s ≈ 1.5M ops/s cluster-wide
+                 (most docs quiet — real peak lower, ~100k ops/s)
+WebSocket conns≈ 50k docs × 3 users ≈ 150k concurrent connections
+Bandwidth/op   ≈ 100 B × 1.5M ≈ 150 MB/s (order of magnitude)
+```
+
+Insight: **don't broadcast full document on every keystroke** — send small **operations** (insert/delete at position) and use **OT or CRDT** to merge them.
+
+## 4. High-Level Design (HLD)
+
+```mermaid
+flowchart TB
+  C1[Client A] --> WS[WebSocket Gateway]
+  C2[Client B] --> WS
+  WS --> Doc[Document Service]
+  Doc --> OT[OT / CRDT Engine]
+  Doc --> Store[(Document Store)]
+  Doc --> PubSub[Pub/Sub — doc channel]
+  PubSub --> WS
+  Doc --> Snap[Snapshot Worker]
+  Snap --> Store
+  Store --> Obj[(Object Storage — snapshots)]
+```
+
+### Components
+
+| Component | Role |
+|-----------|------|
+| WebSocket Gateway | Long-lived connections, auth, heartbeats |
+| Document Service | Session per open doc; routes ops |
+| OT/CRDT Engine | Transform or merge concurrent operations |
+| Document Store | Current serialized state + op log |
+| Pub/Sub | Fan-out ops to all server instances hosting doc users |
+| Snapshot Worker | Periodically compact op log to snapshot |
+| Presence Service | Who is in doc, cursor positions (ephemeral) |
+
+### Flows
+
+**Open document**
+
+1. Client connects WebSocket, joins `doc:{docId}` room  
+2. Server loads latest snapshot + ops since snapshot revision  
+3. Client rebuilds local doc; receives pending ops  
+
+**Local edit**
+
+1. User types "X" at position 42  
+2. Client applies locally immediately (optimistic UI)  
+3. Client sends op `{ type: INSERT, pos: 42, text: "X", clientId, seq: 17 }`  
+4. Server assigns global revision, transforms against concurrent ops (OT) or merges (CRDT)  
+5. Server persists op, broadcasts to other clients  
+
+**Concurrent edit**
+
+1. User A inserts at pos 10; User B deletes at pos 5 — both in flight  
+2. Server orders ops (total order by revision)  
+3. OT transforms B's op against A's (or CRDT merges without transform)  
+4. All clients apply same ordered ops → identical text  
+
+### OT vs CRDT (beginner level)
+
+Both solve the same problem: **merge edits without locks**.
+
+**Operational Transformation (OT)**
+
+- Represent edits as ops: *insert(pos, text)*, *delete(pos, len)*  
+- Server keeps a **total order** of ops (revision 1, 2, 3…)  
+- When op B arrives while op A was already applied, **transform** B against A so B's positions still make sense  
+
+```text
+Doc: "cat"
+A inserts "s" at 0 → "scat"
+B deletes 1 char at 0 (thought it was "cat" → delete 'c')
+
+Without transform, B might delete wrong character.
+OT adjusts B's delete position because A inserted before it.
+```
+
+- Pros: compact ops, mature in Google Docs / Etherpad  
+- Cons: transformation rules get complex for rich text; server often central for ordering  
+
+**CRDT (Conflict-free Replicated Data Type)**
+
+- Each character (or run) gets a **unique ID** that determines sort order, not raw index  
+- Insert "X" = create ID between neighbors; delete = tombstone flag  
+- Any two replicas merge by sorting IDs — **no transform function**  
+
+```text
+"cat" → IDs: c1 c2 c3
+Insert "s" before c → new ID s0 (s0 < c1 in order) → "scat"
+Deletes mark ID tombstoned; merge is union of alive IDs
+```
+
+- Pros: easier formal correctness for P2P / offline; no central transform  
+- Cons: metadata overhead (IDs per char); garbage collection of tombstones  
+
+**Interview shortcut:** OT = transform ops against each other; CRDT = unique IDs + merge by rule. Many new systems pick **CRDT** (Yjs, Automerge) for offline; **OT** still common server-authoritative.
+
+### Trade-offs
+
+| Choice | Pros | Cons |
+|--------|------|------|
+| OT (server authoritative) | Smaller messages | Complex transforms for rich text |
+| CRDT (RGA / YATA) | Strong offline/P2P story | Larger op size |
+| Central server ordering | Simple total order | Server is coordination point |
+| Op log + snapshot | Fast recovery | Compaction job needed |
+| Last-write-wins | Trivial | Wrong for collaborative editing |
+
+## 5. Low-Level Design (LLD)
+
+### APIs
+
+```text
+POST /api/v1/docs
+Body: { "title": "Meeting notes" }
+→ { "docId": "d_abc", "revision": 0 }
+
+GET  /api/v1/docs/:docId
+→ { "title", "revision", "snapshotUrl" OR "content" }
+
+WS   /ws/docs/:docId?token=...
+Messages (JSON):
+  Client → Server: { "type": "op", "baseRev": 41, "op": { ... } }
+  Server → Client: { "type": "ack", "clientSeq": 17, "assignedRev": 42 }
+  Server → Client: { "type": "op", "rev": 42, "op": { ... }, "authorId": "u2" }
+  Client ↔ Server: { "type": "presence", "cursor": 100, "selection": [100,105] }
+```
+
+### Schema
+
+```text
+documents (
+  doc_id        VARCHAR PRIMARY KEY,
+  title         VARCHAR(255),
+  head_rev      BIGINT NOT NULL DEFAULT 0,
+  snapshot_rev  BIGINT DEFAULT 0,
+  snapshot_uri  TEXT NULL,
+  created_at    TIMESTAMPTZ,
+  updated_at    TIMESTAMPTZ
+)
+
+operations (
+  doc_id        VARCHAR NOT NULL,
+  rev           BIGINT NOT NULL,
+  author_id     VARCHAR NOT NULL,
+  op_type       VARCHAR(16),     -- INSERT | DELETE
+  position      INT,             -- OT style (or JSON CRDT payload)
+  payload       JSONB NOT NULL,  -- { "text": "hi" } or CRDT ids
+  created_at    TIMESTAMPTZ,
+  PRIMARY KEY (doc_id, rev)
+)
+
+doc_acl (
+  doc_id    VARCHAR,
+  user_id   VARCHAR,
+  role      VARCHAR,             -- viewer | editor
+  PRIMARY KEY (doc_id, user_id)
+)
+```
+
+### Modules
+
+```text
+DocController / DocSessionManager
+WebSocketHub / ConnectionRegistry
+OTEngine (transformInsertInsert, transformDeleteInsert, ...)
+-- OR --
+CRDTEngine (RGA / Yjs-compatible merge)
+OpLogRepository / SnapshotRepository
+PresenceTracker (in-memory Redis)
+CompactionWorker
+```
+
+### Algorithm — server-side OT (simplified insert-only + delete)
+
+```text
+function applyClientOp(docId, clientOp, baseRev, authorId):
+  doc = loadDocState(docId)   // snapshot + ops through head_rev
+  if baseRev < doc.head_rev:
+    // client missed ops — transform clientOp against ops (baseRev+1 .. head_rev)
+    for rev in (baseRev+1 .. doc.head_rev):
+      clientOp = transform(clientOp, doc.ops[rev])
+
+  newRev = doc.head_rev + 1
+  doc.apply(clientOp)
+  persistOperation(docId, newRev, clientOp, authorId)
+  broadcast(docId, { rev: newRev, op: clientOp, authorId })
+  return newRev
+
+function transform(opA, opB):
+  // Example: insert vs insert at same region
+  if opA.type == INSERT and opB.type == INSERT:
+    if opA.pos <= opB.pos:
+      return opB with pos = opB.pos + len(opA.text)
+    else:
+      return opB unchanged
+  // ... delete cases (adjust indices)
+```
+
+### Algorithm — CRDT insert (conceptual RGA)
+
+```text
+function crdtInsert(doc, afterId, newChar, clientId, seq):
+  newId = (clientId, seq, hash(newChar))
+  doc.chars.insertAfter(afterId, { id: newId, value: newChar, deleted: false })
+  broadcast({ type: "CRDT_INSERT", id: newId, after: afterId, value: newChar })
+
+function crdtMerge(local, remoteOps):
+  for op in remoteOps:
+    apply(op)   // idempotent — same id not inserted twice
+  local.sortCharsById()
+  return renderVisibleChars()
+```
+
+### Algorithm — snapshot compaction
+
+```text
+function compact(docId):
+  if opCountSinceSnapshot(docId) < 1000: return
+  state = replayAllOps(docId)
+  uri = objectStorage.put(snapshotBytes(state))
+  update documents set snapshot_rev = head_rev, snapshot_uri = uri
+  delete operations where doc_id = docId and rev <= head_rev - 100  // keep tail
+```
+
+### Concurrency notes
+
+- **Single writer per doc shard** (or per doc mutex) simplifies OT ordering  
+- Assign `rev` with DB transaction `SELECT head_rev FOR UPDATE` or per-doc sequence in Redis  
+- Idempotent client retries: include `(clientId, clientSeq)`; server dedupes  
+- Presence/cursor data is ephemeral — Redis with TTL, not durable op log  
+- On reconnect: client sends `baseRev` + pending ops; server replays gap  
+
+## 6. Scale evolution
+
+| Stage | Load | Changes |
+|-------|------|---------|
+| MVP | 100 docs live | Single server, in-memory doc, OT engine, Postgres op log |
+| Growth | 10k connections | WebSocket farm + sticky sessions OR Redis Pub/Sub for cross-node fan-out |
+| Hot doc | 50 editors | Serialize ops per doc; optional op batching (50 ms window) |
+| Storage | Long op logs | Snapshot every N ops; cold storage for old snapshots |
+| Global | Multi-region | Hard — prefer single home region per doc; CRDT helps offline branches |
+| Rich text | Formatting | Consider CRDT (Yjs) or commercial OT library; don't hand-roll all transforms |
+
+## 7. Recap
+
+- Collaborative editing needs **operations**, not whole-file overwrites  
+- **OT** transforms concurrent ops against each other with a server total order  
+- **CRDT** gives every insert a unique ID so replicas merge without transforms  
+- Persist **op log + periodic snapshots**; use WebSocket + Pub/Sub for real-time fan-out  
+
+**Practice:** two users insert at position 0 simultaneously — explain how OT transforms one op, and how CRDT would assign IDs so both letters appear consistently.
