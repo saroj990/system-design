@@ -9,13 +9,14 @@ export type NavSection = {
 };
 
 export const GITHUB_REPO = 'https://github.com/saroj990/system-design';
-export const LIVE_SITE = 'https://system-design-dun-sigma.vercel.app';
+export const LIVE_SITE = 'https://system-design-iota-ten.vercel.app';
 
 export const navigation: NavSection[] = [
   {
     title: 'Start here',
     items: [
       { title: 'Home', href: '/' },
+      { title: 'Live app ↗', href: LIVE_SITE },
       { title: 'How to use this course', href: '/how-to-use' },
       { title: 'Deploy this site', href: '/deploy' },
     ],

@@ -1,6 +1,12 @@
 # System Design Handbook
 
-> **Live site:** [system-design-dun-sigma.vercel.app](https://system-design-dun-sigma.vercel.app/#/) · **GitHub:** [saroj990/system-design](https://github.com/saroj990/system-design)
+## View the live app
+
+**[Open System Design Handbook →](https://system-design-iota-ten.vercel.app/)**
+
+Browse the full interactive course in your browser — 15 fundamentals, 20 case studies, HLD/LLD diagrams, and prev/next navigation.
+
+> **Live app:** [system-design-iota-ten.vercel.app](https://system-design-iota-ten.vercel.app/) · **GitHub:** [saroj990/system-design](https://github.com/saroj990/system-design)
 
 A complete beginner-to-interview path for designing backend systems: clarify requirements, estimate scale, draw a clear **HLD**, then specify **LLD** with APIs, schemas, and algorithms.
 
@@ -170,7 +176,7 @@ Every case study trains the same loop so the method becomes automatic.
 
 ## Run & deploy
 
-**Live handbook:** [https://system-design-dun-sigma.vercel.app](https://system-design-dun-sigma.vercel.app)
+**Live handbook:** [https://system-design-iota-ten.vercel.app](https://system-design-iota-ten.vercel.app)
 
 ```bash
 npm install

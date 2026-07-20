@@ -33,7 +33,13 @@ export default function Sidebar() {
                   key={item.href}
                   className={pathname === item.href ? 'active' : undefined}
                 >
-                  <Link href={item.href}>{item.title}</Link>
+                  {item.href.startsWith('http') ? (
+                    <a href={item.href} target="_blank" rel="noopener noreferrer">
+                      {item.title}
+                    </a>
+                  ) : (
+                    <Link href={item.href}>{item.title}</Link>
+                  )}
                 </li>
               ))}
             </ul>

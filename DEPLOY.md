@@ -2,7 +2,7 @@
 
 This is a **Next.js** app. Deploy it on Vercel with zero config.
 
-**Live site:** [system-design-dun-sigma.vercel.app](https://system-design-dun-sigma.vercel.app)  
+**Live site:** [system-design-iota-ten.vercel.app](https://system-design-iota-ten.vercel.app)  
 **GitHub:** [github.com/saroj990/system-design](https://github.com/saroj990/system-design)
 
 ## Local development
