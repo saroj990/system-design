@@ -382,6 +382,24 @@ section.cover .cover-main > p:last-child a:last-child {
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
+section.cover .cover-main > p:last-child a:nth-child(3) {
+  background-color: #fffbeb !important;
+  color: #92400e !important;
+  border: 1px solid #fcd34d !important;
+}
+
+section.cover .cover-like {
+  font-size: 0.9rem;
+  color: #64748b;
+  margin: 0 auto 1.5rem;
+  max-width: 28em;
+  line-height: 1.5;
+}
+
+section.cover .cover-like strong {
+  color: var(--ink);
+}
+
 section.cover .cover-main > p:last-child a:hover {
   transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(15, 92, 86, 0.18);
@@ -538,6 +556,95 @@ section.cover .cover-case-card {
   text-underline-offset: 3px;
 }
 
+/* Like / star banners */
+.home-like-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem 1rem;
+  margin: 1.25rem 0 2rem;
+  padding: 0.9rem 1.1rem;
+  border-radius: 10px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  font-size: 0.92rem;
+  color: #78350f;
+  line-height: 1.5;
+}
+
+.home-like-banner a {
+  font-weight: 600;
+  color: #92400e !important;
+  text-decoration: none;
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  white-space: nowrap;
+}
+
+.home-like-banner a:hover {
+  background: #fde68a;
+}
+
+/* Page footer on every lesson */
+.page-footer {
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.page-footer-like {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 0.85rem;
+  padding: 0.9rem 1rem;
+  border-radius: 10px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  font-size: 0.88rem;
+  color: #78350f;
+  line-height: 1.5;
+}
+
+.page-footer-icon {
+  font-size: 1.1rem;
+}
+
+.page-footer-star {
+  font-weight: 600;
+  color: #92400e !important;
+  text-decoration: none !important;
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  white-space: nowrap;
+  margin-left: auto;
+}
+
+.page-footer-star:hover {
+  background: #fde68a;
+}
+
+.page-footer-links {
+  margin-top: 0.85rem;
+  font-size: 0.8rem;
+  color: #94a3b8;
+  text-align: center;
+}
+
+.page-footer-links a {
+  color: var(--theme-color) !important;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.page-footer-links span {
+  margin: 0 0.4rem;
+}
+
 /* Tips */
 .tip, .warn, .danger {
   padding: 0.85rem 1rem;
@@ -599,5 +706,14 @@ section.cover .cover-case-card {
 
   .home-case-grid {
     grid-template-columns: 1fr;
+  }
+
+  .page-footer-like {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .page-footer-star {
+    margin-left: 0;
   }
 }

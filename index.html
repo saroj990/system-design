@@ -57,6 +57,11 @@
       onlyCover: false,
       auto2top: true,
       homepage: 'README.md',
+      alias: {
+        '/': '/README.md',
+        '/home': '/README.md',
+        '/Home': '/README.md'
+      },
       themeColor: '#0f5c56',
       search: {
         maxAge: 86400000,
@@ -79,12 +84,36 @@
       plugins: [
         function (hook) {
           hook.doneEach(function () {
-            // Small delay so Docsify finishes injecting the HTML
             setTimeout(renderMermaidDiagrams, 0);
+            injectPageFooter();
           });
         }
       ]
     };
+
+    var GITHUB_REPO = 'https://github.com/saroj990/system-design';
+    var LIVE_SITE = 'https://system-design-dun-sigma.vercel.app/#/';
+
+    function injectPageFooter() {
+      var section = document.querySelector('section.content .markdown-section');
+      if (!section || section.querySelector('.page-footer')) return;
+
+      var footer = document.createElement('div');
+      footer.className = 'page-footer';
+      footer.innerHTML =
+        '<div class="page-footer-like">' +
+          '<span class="page-footer-icon">👍</span>' +
+          '<span>Found this helpful? Give the repo a <strong>star on GitHub</strong> — it helps others discover this handbook.</span>' +
+          '<a href="' + GITHUB_REPO + '" target="_blank" rel="noopener" class="page-footer-star">Star on GitHub ⭐</a>' +
+        '</div>' +
+        '<div class="page-footer-links">' +
+          '<a href="' + LIVE_SITE + '">Live site</a>' +
+          '<span>·</span>' +
+          '<a href="' + GITHUB_REPO + '" target="_blank" rel="noopener">GitHub</a>' +
+        '</div>';
+
+      section.appendChild(footer);
+    }
   </script>
   <script src="https://cdn.jsdelivr.net/npm/docsify@4/lib/docsify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/docsify@4/lib/plugins/search.min.js"></script>

@@ -78,5 +78,10 @@
 
 </div>
 
-[Start learning](how-to-use.md)
-[Browse fundamentals](fundamentals/01-what-is-system-design.md)
+<div class="cover-like">
+  👍 Enjoying this handbook? Give it a <strong>star on GitHub</strong> if you find it helpful.
+</div>
+
+[Start learning](/how-to-use.md)
+[Browse fundamentals](/fundamentals/01-what-is-system-design.md)
+[⭐ Star on GitHub](https://github.com/saroj990/system-design)

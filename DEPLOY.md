@@ -2,6 +2,9 @@
 
 This folder is a **static Docsify site**. Any static host works.
 
+**Live site:** [system-design-dun-sigma.vercel.app](https://system-design-dun-sigma.vercel.app/#/)  
+**GitHub:** [github.com/saroj990/system-design](https://github.com/saroj990/system-design)
+
 ## Local
 
 ```bash

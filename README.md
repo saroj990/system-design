@@ -1,6 +1,13 @@
 # System Design Handbook
 
+> **Live site:** [system-design-dun-sigma.vercel.app](https://system-design-dun-sigma.vercel.app/#/) · **GitHub:** [saroj990/system-design](https://github.com/saroj990/system-design)
+
 A complete beginner-to-interview path for designing backend systems: clarify requirements, estimate scale, draw a clear **HLD**, then specify **LLD** with APIs, schemas, and algorithms.
+
+<div class="home-like-banner">
+  👍 Enjoying this handbook? Give the repo a <strong>star on GitHub</strong> — it helps others discover it and keeps this project going.
+  <a href="https://github.com/saroj990/system-design" target="_blank" rel="noopener">Star on GitHub ⭐</a>
+</div>
 
 <div class="home-hero-meta">
   <span>15 fundamentals</span>
@@ -54,63 +61,63 @@ Start with these — they cover the patterns interviewers ask most often. Each i
 
 <div class="home-case-grid">
 
-<a class="home-case-card" href="#/case-studies/01-url-shortener">
+<a class="home-case-card" href="#/case-studies/01-url-shortener.md">
   <span class="home-case-num">01</span>
   <strong class="home-case-title">URL Shortener</strong>
   <span class="home-case-desc">bit.ly-style redirects at scale</span>
   <span class="home-case-tags">Caching · Unique codes · Read-heavy</span>
 </a>
 
-<a class="home-case-card" href="#/case-studies/03-rate-limiter">
+<a class="home-case-card" href="#/case-studies/03-rate-limiter.md">
   <span class="home-case-num">03</span>
   <strong class="home-case-title">Rate Limiter</strong>
   <span class="home-case-desc">Protect APIs from abuse</span>
   <span class="home-case-tags">Token bucket · Redis · Middleware</span>
 </a>
 
-<a class="home-case-card" href="#/case-studies/06-news-feed">
+<a class="home-case-card" href="#/case-studies/06-news-feed.md">
   <span class="home-case-num">06</span>
   <strong class="home-case-title">News Feed</strong>
   <span class="home-case-desc">Twitter/X-style timeline</span>
   <span class="home-case-tags">Fan-out · Denormalization · Hot users</span>
 </a>
 
-<a class="home-case-card" href="#/case-studies/07-chat-messaging">
+<a class="home-case-card" href="#/case-studies/07-chat-messaging.md">
   <span class="home-case-num">07</span>
   <strong class="home-case-title">Chat / Messaging</strong>
   <span class="home-case-desc">WhatsApp-like real-time chat</span>
   <span class="home-case-tags">WebSockets · Delivery · Ordering</span>
 </a>
 
-<a class="home-case-card" href="#/case-studies/08-photo-sharing">
+<a class="home-case-card" href="#/case-studies/08-photo-sharing.md">
   <span class="home-case-num">08</span>
   <strong class="home-case-title">Photo Sharing</strong>
   <span class="home-case-desc">Instagram-style uploads & feed</span>
   <span class="home-case-tags">S3 · CDN · Async processing</span>
 </a>
 
-<a class="home-case-card" href="#/case-studies/09-video-streaming">
+<a class="home-case-card" href="#/case-studies/09-video-streaming.md">
   <span class="home-case-num">09</span>
   <strong class="home-case-title">Video Streaming</strong>
   <span class="home-case-desc">YouTube-style on-demand video</span>
   <span class="home-case-tags">Transcoding · HLS · ABR</span>
 </a>
 
-<a class="home-case-card" href="#/case-studies/10-ride-sharing">
+<a class="home-case-card" href="#/case-studies/10-ride-sharing.md">
   <span class="home-case-num">10</span>
   <strong class="home-case-title">Ride Sharing</strong>
   <span class="home-case-desc">Uber-style driver matching</span>
   <span class="home-case-tags">Geo search · Real-time · State machine</span>
 </a>
 
-<a class="home-case-card" href="#/case-studies/11-ticket-booking">
+<a class="home-case-card" href="#/case-studies/11-ticket-booking.md">
   <span class="home-case-num">11</span>
   <strong class="home-case-title">Ticket Booking</strong>
   <span class="home-case-desc">Concert seats under flash traffic</span>
   <span class="home-case-tags">Inventory locks · Holds · Queues</span>
 </a>
 
-<a class="home-case-card" href="#/case-studies/15-payment-wallet">
+<a class="home-case-card" href="#/case-studies/15-payment-wallet.md">
   <span class="home-case-num">15</span>
   <strong class="home-case-title">Payment / Wallet</strong>
   <span class="home-case-desc">Transfers with correct balances</span>
@@ -119,7 +126,7 @@ Start with these — they cover the patterns interviewers ask most often. Each i
 
 </div>
 
-<p class="home-case-more">See all 20 case studies in the <a href="#/case-studies/01-url-shortener">full catalog below</a> or jump to <a href="#/case-studies/14-notification-system">Notifications</a>, <a href="#/case-studies/18-file-storage">File Storage</a>, or <a href="#/case-studies/20-analytics-pipeline">Analytics</a>.</p>
+<p class="home-case-more">See all 20 case studies in the catalog below, or jump to <a href="#/case-studies/14-notification-system.md">Notifications</a>, <a href="#/case-studies/18-file-storage.md">File Storage</a>, or <a href="#/case-studies/20-analytics-pipeline.md">Analytics</a>.</p>
 
 ## Learning path
 
@@ -163,6 +170,8 @@ Every case study trains the same loop so the method becomes automatic.
 
 ## Run & deploy
 
+**Live handbook:** [https://system-design-dun-sigma.vercel.app](https://system-design-dun-sigma.vercel.app/#/)
+
 ```bash
 npm start
 ```
@@ -172,6 +181,12 @@ Open [http://localhost:3000](http://localhost:3000). Use a local static server �
 This site is fully static. Host it on GitHub Pages, Netlify, Vercel, or any CDN. See [Deploy this site](DEPLOY.md).
 
 ---
+
+<div class="home-like-banner">
+
+👍 **Found this useful?** Give the project a star on [GitHub](https://github.com/saroj990/system-design) — it takes one click and helps more learners find this handbook.
+
+</div>
 
 <div class="home-cta">
 
