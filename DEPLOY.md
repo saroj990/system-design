@@ -1,31 +1,45 @@
 # Deploying this tutorial
 
-This folder is a **static Docsify site**. Any static host works.
+This is a **Next.js** app. Deploy it on Vercel with zero config.
 
-**Live site:** [system-design-dun-sigma.vercel.app](https://system-design-dun-sigma.vercel.app/#/)  
+**Live site:** [system-design-dun-sigma.vercel.app](https://system-design-dun-sigma.vercel.app)  
 **GitHub:** [github.com/saroj990/system-design](https://github.com/saroj990/system-design)
 
-## Local
+## Local development
 
 ```bash
+npm install
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000)
+
+## Production build
+
+```bash
+npm run build
 npm start
 ```
 
-Open http://localhost:3000
+## Deploy to Vercel
 
-## GitHub Pages
+1. Push this repo to GitHub  
+2. Import the project at [vercel.com/new](https://vercel.com/new)  
+3. Vercel auto-detects Next.js — no build settings needed  
+4. Deploy  
 
-1. Push this folder to a GitHub repo  
-2. Settings → Pages → Deploy from branch → `/` (root)  
-3. Site URL will be `https://<user>.github.io/<repo>/`  
+Every push to `main` / `master` triggers a new deployment.
 
-The empty `.nojekyll` file tells GitHub Pages not to ignore underscore files like `_sidebar.md`.
+## Project structure
 
-## Netlify / Vercel / Cloudflare Pages
-
-- Publish directory: repository root (where `index.html` lives)  
-- No build command required  
+```text
+app/              Next.js pages & layout
+components/       Sidebar, Markdown, Mermaid, Cover hero
+fundamentals/     Markdown lessons (15)
+case-studies/     Markdown case studies (20)
+lib/              Content loading & navigation
+```
 
 ## Custom domain
 
-Point DNS at your static host and set the domain in the host’s dashboard.
+In Vercel: Project → Settings → Domains → add your domain and update DNS.

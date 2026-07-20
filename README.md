@@ -170,15 +170,14 @@ Every case study trains the same loop so the method becomes automatic.
 
 ## Run & deploy
 
-**Live handbook:** [https://system-design-dun-sigma.vercel.app](https://system-design-dun-sigma.vercel.app/#/)
+**Live handbook:** [https://system-design-dun-sigma.vercel.app](https://system-design-dun-sigma.vercel.app)
 
 ```bash
-npm start
+npm install
+npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). Use a local static server — opening `index.html` as a file will not load Markdown correctly.
-
-This site is fully static. Host it on GitHub Pages, Netlify, Vercel, or any CDN. See [Deploy this site](DEPLOY.md).
+Open [http://localhost:3000](http://localhost:3000). This is a **Next.js** app — deploy safely to Vercel with `git push`. See [Deploy this site](DEPLOY.md).
 
 ---
 

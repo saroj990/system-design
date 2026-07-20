@@ -1,10 +1,26 @@
 {
-  "name": "system-design-tutorial",
-  "version": "1.0.0",
+  "name": "system-design-handbook",
+  "version": "2.0.0",
   "private": true,
-  "description": "Beginner System Design tutorial (Docsify static site)",
   "scripts": {
-    "start": "npx --yes serve -l 3000",
-    "serve": "npx --yes serve -l 3000"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "mermaid": "^10.9.3",
+    "next": "^15.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^9.0.3",
+    "rehype-raw": "^7.0.0",
+    "remark-gfm": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.7.0"
   }
 }
