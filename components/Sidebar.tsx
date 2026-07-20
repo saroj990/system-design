@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { GITHUB_REPO, LIVE_SITE, navigation } from '@/lib/navigation';
+import ThemeToggle from './ThemeToggle';
 
 export default function Sidebar() {
   const pathname = usePathname();
@@ -10,16 +11,19 @@ export default function Sidebar() {
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
-        <Link href="/" className="sidebar-title">
-          System Design
-        </Link>
-        <div className="sidebar-external">
-          <a href={LIVE_SITE} target="_blank" rel="noopener noreferrer">
-            Live
-          </a>
-          <a href={GITHUB_REPO} target="_blank" rel="noopener noreferrer">
-            GitHub
-          </a>
+        <div className="sidebar-header-row">
+          <Link href="/" className="sidebar-title">
+            System Design
+          </Link>
+          <div className="sidebar-header-actions">
+            <a href={LIVE_SITE} target="_blank" rel="noopener noreferrer" className="sidebar-chip">
+              Live
+            </a>
+            <a href={GITHUB_REPO} target="_blank" rel="noopener noreferrer" className="sidebar-chip">
+              GitHub
+            </a>
+            <ThemeToggle />
+          </div>
         </div>
       </div>
 

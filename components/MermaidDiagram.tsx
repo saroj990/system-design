@@ -1,38 +1,78 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
-import mermaid from 'mermaid';
+import { useEffect, useId, useRef, useState } from 'react';
 
 type MermaidDiagramProps = {
   chart: string;
 };
 
+function getMermaidTheme(): 'neutral' | 'dark' {
+  return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'neutral';
+}
+
 export default function MermaidDiagram({ chart }: MermaidDiagramProps) {
-  const ref = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const renderId = useId().replace(/:/g, '');
+  const [mounted, setMounted] = useState(false);
+  const [theme, setTheme] = useState<'neutral' | 'dark'>('neutral');
+
+  // Defer all browser-only work until after hydration
+  useEffect(() => {
+    setMounted(true);
+    setTheme(getMermaidTheme());
+
+    const observer = new MutationObserver(() => {
+      setTheme(getMermaidTheme());
+    });
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme'],
+    });
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
-    if (!ref.current) return;
+    if (!mounted || !containerRef.current) return;
 
-    mermaid.initialize({
-      startOnLoad: false,
-      theme: 'neutral',
-      securityLevel: 'loose',
-      flowchart: { htmlLabels: true, curve: 'basis' },
-    });
+    let cancelled = false;
 
-    const id = `mermaid-${Math.random().toString(36).slice(2)}`;
-    ref.current.removeAttribute('data-processed');
+    async function renderDiagram() {
+      const mermaid = (await import('mermaid')).default;
+      const currentTheme = getMermaidTheme();
 
-    mermaid
-      .render(id, chart)
-      .then(({ svg }) => {
-        if (ref.current) ref.current.innerHTML = svg;
-      })
-      .catch((err) => {
-        console.error('Mermaid render error:', err);
-        if (ref.current) ref.current.textContent = chart;
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: currentTheme,
+        securityLevel: 'loose',
+        flowchart: { htmlLabels: true, curve: 'basis' },
       });
-  }, [chart]);
 
-  return <div ref={ref} className="mermaid" />;
+      try {
+        const { svg } = await mermaid.render(`mermaid-${renderId}`, chart);
+        if (!cancelled && containerRef.current) {
+          containerRef.current.innerHTML = svg;
+        }
+      } catch (err) {
+        console.error('Mermaid render error:', err);
+        if (!cancelled && containerRef.current) {
+          containerRef.current.textContent = chart;
+        }
+      }
+    }
+
+    renderDiagram();
+    return () => {
+      cancelled = true;
+    };
+  }, [mounted, chart, theme, renderId]);
+
+  return (
+    <div className="mermaid-wrapper" suppressHydrationWarning>
+      {!mounted ? (
+        <div className="mermaid mermaid-skeleton" aria-label="Loading diagram" />
+      ) : (
+        <div ref={containerRef} className="mermaid" />
+      )}
+    </div>
+  );
 }

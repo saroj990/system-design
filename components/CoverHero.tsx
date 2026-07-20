@@ -4,19 +4,23 @@ import { GITHUB_REPO } from '@/lib/navigation';
 const categories = [
   {
     label: 'Building blocks',
-    items: ['URL Shortener', 'Pastebin', 'Rate Limiter', 'Key-Value Store', 'Unique ID Generator', 'Distributed Cache'],
+    items: ['URL Shortener', 'Rate Limiter', 'API Gateway', 'Key-Value Store', 'Distributed Cache', 'Distributed Scheduler'],
   },
   {
     label: 'Social & real-time',
-    items: ['News Feed', 'Chat / Messaging', 'Notification System', 'Collaborative Docs'],
+    items: ['News Feed', 'Chat', 'Trending Topics', 'Nearby Friends', 'Leaderboard', 'Video Conferencing'],
   },
   {
     label: 'Media & content',
-    items: ['Photo Sharing', 'Video Streaming', 'File Storage', 'Web Crawler', 'Search Autocomplete'],
+    items: ['Photo Sharing', 'Video Streaming', 'Music Streaming', 'Web Search', 'Web Crawler', 'Search Autocomplete'],
   },
   {
     label: 'Commerce & platform',
-    items: ['Ride Sharing', 'Ticket Booking', 'Payment / Wallet', 'E-commerce', 'Analytics Pipeline'],
+    items: ['Ride Sharing', 'Hotel Booking', 'Ticket Booking', 'Payment / Wallet', 'E-commerce', 'Online Code Judge'],
+  },
+  {
+    label: 'Advanced / difficult',
+    items: ['Order Matching', 'Distributed Coordination', 'Ad Aggregation', 'Active-Active DB', 'Saga Transactions', 'ML Recommendations', 'Exabyte Storage', 'Kafka Streaming', 'DDoS Mitigation', 'Email at Scale'],
   },
 ];
 
@@ -40,7 +44,7 @@ export default function CoverHero() {
           <span className="cover-stat-label">Fundamentals</span>
         </div>
         <div className="cover-stat">
-          <span className="cover-stat-num">20</span>
+          <span className="cover-stat-num">40</span>
           <span className="cover-stat-label">Case studies</span>
         </div>
         <div className="cover-stat">
@@ -52,7 +56,7 @@ export default function CoverHero() {
       <div className="cover-panel">
         <div className="cover-panel-head">
           <span className="cover-panel-title">What&apos;s inside</span>
-          <span className="cover-panel-sub">Real apps you&apos;ll learn to design end-to-end</span>
+          <span className="cover-panel-sub">40 real apps — including 10 advanced senior-level designs</span>
         </div>
         <div className="cover-categories">
           {categories.map((cat) => (

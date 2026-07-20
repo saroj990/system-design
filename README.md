@@ -4,7 +4,7 @@
 
 **[Open System Design Handbook →](https://system-design-iota-ten.vercel.app/)**
 
-Browse the full interactive course in your browser — 15 fundamentals, 20 case studies, HLD/LLD diagrams, and prev/next navigation.
+Browse the full interactive course in your browser — 15 fundamentals, 40 case studies (10 advanced), HLD/LLD diagrams, dark mode, and prev/next navigation.
 
 > **Live app:** [system-design-iota-ten.vercel.app](https://system-design-iota-ten.vercel.app/) · **GitHub:** [saroj990/system-design](https://github.com/saroj990/system-design)
 
@@ -17,8 +17,10 @@ A complete beginner-to-interview path for designing backend systems: clarify req
 
 <div class="home-hero-meta">
   <span>15 fundamentals</span>
-  <span>20 case studies</span>
+  <span>40 case studies</span>
+  <span>10 advanced</span>
   <span>HLD + LLD for every app</span>
+  <span>Dark mode</span>
 </div>
 
 ## Who this is for
@@ -51,7 +53,7 @@ requirements → estimates → APIs → load balancing → databases → replica
 
 ### Part 2 — Case studies
 
-Twenty common products, each designed end-to-end with the same template: problem, requirements, capacity math, component diagram, APIs, schema, algorithms, and scale evolution.
+Twenty common products, each designed end-to-end with the same template: problem, requirements, capacity math, component diagram, APIs, schema, algorithms, and scale evolution. **40 case studies** in total — including **10 advanced** senior-level designs. See the full catalog below.
 
 Start with [URL Shortener](case-studies/01-url-shortener.md), then [Rate Limiter](case-studies/03-rate-limiter.md), then explore freely.
 
@@ -132,7 +134,7 @@ Start with these — they cover the patterns interviewers ask most often. Each i
 
 </div>
 
-<p class="home-case-more">See all 20 case studies in the catalog below, or jump to <a href="#/case-studies/14-notification-system.md">Notifications</a>, <a href="#/case-studies/18-file-storage.md">File Storage</a>, or <a href="#/case-studies/20-analytics-pipeline.md">Analytics</a>.</p>
+<p class="home-case-more">See all 40 case studies in the catalog below, or jump to advanced topics: <a href="/case-studies/31-order-matching-engine">Order Matching</a>, <a href="/case-studies/35-saga-distributed-transactions">Saga</a>, or <a href="/case-studies/38-kafka-scale-streaming">Kafka Streaming</a>.</p>
 
 ## Learning path
 
@@ -173,6 +175,31 @@ Every case study trains the same loop so the method becomes automatic.
 | 18 | [File Storage](case-studies/18-file-storage.md) | Sync & dedup |
 | 19 | [Collaborative Docs](case-studies/19-collaborative-docs.md) | OT / CRDT basics |
 | 20 | [Analytics Pipeline](case-studies/20-analytics-pipeline.md) | Ingest → warehouse |
+| 21 | [Music Streaming](case-studies/21-music-streaming.md) | Spotify, playlists, CDN |
+| 22 | [Hotel Booking](case-studies/22-hotel-booking.md) | Airbnb, calendar locks |
+| 23 | [Online Code Judge](case-studies/23-online-judge.md) | LeetCode, sandboxes |
+| 24 | [API Gateway](case-studies/24-api-gateway.md) | Routing, auth, aggregation |
+| 25 | [Leaderboard](case-studies/25-leaderboard.md) | Redis ZSET, gaming ranks |
+| 26 | [Trending Topics](case-studies/26-trending-topics.md) | Hashtags, top-K windows |
+| 27 | [Video Conferencing](case-studies/27-video-conferencing.md) | Zoom, WebRTC, SFU |
+| 28 | [Nearby Friends](case-studies/28-nearby-friends.md) | Geohash, location |
+| 29 | [Web Search Engine](case-studies/29-web-search-engine.md) | Inverted index, ranking |
+| 30 | [Distributed Scheduler](case-studies/30-distributed-scheduler.md) | Cron at scale, leases |
+
+### Advanced / difficult (31–40)
+
+| # | System | Focus |
+|---|--------|--------|
+| 31 | [Order Matching Engine](case-studies/31-order-matching-engine.md) | Order book, price-time priority |
+| 32 | [Distributed Coordination](case-studies/32-distributed-coordination.md) | etcd/Chubby, Raft, leases, watches |
+| 33 | [Ad Click Aggregation](case-studies/33-ad-click-aggregation.md) | Billions/day, dedup, fraud, windows |
+| 34 | [Multi-Region Active-Active](case-studies/34-multi-region-active-active.md) | Vector clocks, CRDTs, conflicts |
+| 35 | [Saga / Distributed Transactions](case-studies/35-saga-distributed-transactions.md) | Compensations, orchestration |
+| 36 | [ML Recommendation Feed](case-studies/36-ml-recommendation-feed.md) | Feature store, ranking pipeline |
+| 37 | [Exabyte Object Storage](case-studies/37-exabyte-object-storage.md) | Erasure coding, S3 internals |
+| 38 | [Kafka-Scale Streaming](case-studies/38-kafka-scale-streaming.md) | ISR, EOS, rebalancing |
+| 39 | [Global DDoS Mitigation](case-studies/39-global-ddos-mitigation.md) | Anycast, scrubbing, edge defense |
+| 40 | [Email at Scale](case-studies/40-email-at-scale.md) | SMTP, indexing, spam, search |
 
 ## Run & deploy
 

@@ -76,16 +76,13 @@ export default function MarkdownContent({
             }
             const isBlock = className?.startsWith('language-');
             if (isBlock) {
-              return (
-                <code className={className}>
-                  {children}
-                </code>
-              );
+              return <code className={className}>{children}</code>;
             }
             return <code>{children}</code>;
           },
           pre: ({ children }) => {
             const child = children as ReactElement<{ className?: string }>;
+            // Avoid invalid <pre><div> nesting — render diagram without <pre> wrapper
             if (child?.props?.className?.includes('language-mermaid')) {
               return <>{children}</>;
             }
