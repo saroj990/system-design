@@ -2,6 +2,8 @@
 
 Design an **S3-compatible object storage system** at exabyte scale: store trillions of objects across millions of disks, survive rack/datacenter failures, serve GET/PUT with 11 nines durability, and support lifecycle policies — explaining **erasure coding**, **metadata partitioning**, and **request routing** internals.
 
+> Want the real-world story of how Amazon does this? Read **[Case Study 41 — Amazon S3 Internals](41-amazon-s3-internals.md)** (heat management, ShardStore, EC, public scale numbers).
+
 ## 1. Problem
 
 Applications store photos, backups, logs, and ML datasets as **opaque blobs** addressed by bucket + key. Unlike a filesystem, objects are **immutable versions** (overwrite = new version), metadata is separate from bytes, and the system must:

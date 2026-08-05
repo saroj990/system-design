@@ -20,7 +20,7 @@ const categories = [
   },
   {
     label: 'Advanced / difficult',
-    items: ['Order Matching', 'Distributed Coordination', 'Ad Aggregation', 'Active-Active DB', 'Saga Transactions', 'ML Recommendations', 'Exabyte Storage', 'Kafka Streaming', 'DDoS Mitigation', 'Email at Scale'],
+    items: ['Order Matching', 'Distributed Coordination', 'Ad Aggregation', 'Active-Active DB', 'Saga Transactions', 'ML Recommendations', 'Exabyte Storage', 'Amazon S3 Internals', 'Kafka Streaming', 'DDoS Mitigation', 'Email at Scale'],
   },
 ];
 
@@ -44,7 +44,7 @@ export default function CoverHero() {
           <span className="cover-stat-label">Fundamentals</span>
         </div>
         <div className="cover-stat">
-          <span className="cover-stat-num">40</span>
+          <span className="cover-stat-num">41</span>
           <span className="cover-stat-label">Case studies</span>
         </div>
         <div className="cover-stat">
@@ -56,7 +56,7 @@ export default function CoverHero() {
       <div className="cover-panel">
         <div className="cover-panel-head">
           <span className="cover-panel-title">What&apos;s inside</span>
-          <span className="cover-panel-sub">40 real apps — including 10 advanced senior-level designs</span>
+          <span className="cover-panel-sub">41 real apps — including advanced designs and an S3 deep dive</span>
         </div>
         <div className="cover-categories">
           {categories.map((cat) => (

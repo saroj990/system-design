@@ -89,6 +89,7 @@ export const navigation: NavSection[] = [
       { title: '38. Kafka-Scale Streaming', href: '/case-studies/38-kafka-scale-streaming' },
       { title: '39. Global DDoS Mitigation', href: '/case-studies/39-global-ddos-mitigation' },
       { title: '40. Email at Scale', href: '/case-studies/40-email-at-scale' },
+      { title: '41. Amazon S3 Internals', href: '/case-studies/41-amazon-s3-internals' },
     ],
   },
 ];

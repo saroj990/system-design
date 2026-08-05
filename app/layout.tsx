@@ -20,7 +20,7 @@ const display = Source_Serif_4({
 export const metadata: Metadata = {
   title: 'System Design Handbook',
   description:
-    'A beginner-friendly System Design handbook: fundamentals, HLD, LLD, and 40 real-world case studies. Install as a PWA for offline reading.',
+    'A beginner-friendly System Design handbook: fundamentals, HLD, LLD, and 41 real-world case studies. Install as a PWA for offline reading.',
   applicationName: 'System Design Handbook',
   appleWebApp: {
     capable: true,

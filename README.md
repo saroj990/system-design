@@ -4,7 +4,7 @@
 
 **[Open System Design Handbook →](https://system-design-iota-ten.vercel.app/)**
 
-Browse the full interactive course in your browser — 15 fundamentals, 40 case studies (10 advanced), HLD/LLD diagrams, dark mode, and prev/next navigation.
+Browse the full interactive course in your browser — 15 fundamentals, 41 case studies (advanced + S3 deep dive), HLD/LLD diagrams, dark mode, and prev/next navigation.
 
 > **Live app:** [system-design-iota-ten.vercel.app](https://system-design-iota-ten.vercel.app/) · **GitHub:** [saroj990/system-design](https://github.com/saroj990/system-design)
 
@@ -17,7 +17,7 @@ A complete beginner-to-interview path for designing backend systems: clarify req
 
 <div class="home-hero-meta">
   <span>15 fundamentals</span>
-  <span>40 case studies</span>
+  <span>41 case studies</span>
   <span>10 advanced</span>
   <span>HLD + LLD for every app</span>
   <span>Dark mode</span>
@@ -53,7 +53,7 @@ requirements → estimates → APIs → load balancing → databases → replica
 
 ### Part 2 — Case studies
 
-Twenty common products, each designed end-to-end with the same template: problem, requirements, capacity math, component diagram, APIs, schema, algorithms, and scale evolution. **40 case studies** in total — including **10 advanced** senior-level designs. See the full catalog below.
+Twenty common products, each designed end-to-end with the same template: problem, requirements, capacity math, component diagram, APIs, schema, algorithms, and scale evolution. **41 case studies** in total — including advanced senior-level designs and a deep Amazon S3 internals chapter. See the full catalog below.
 
 Start with [URL Shortener](case-studies/01-url-shortener.md), then [Rate Limiter](case-studies/03-rate-limiter.md), then explore freely.
 
@@ -134,7 +134,7 @@ Start with these — they cover the patterns interviewers ask most often. Each i
 
 </div>
 
-<p class="home-case-more">See all 40 case studies in the catalog below, or jump to advanced topics: <a href="/case-studies/31-order-matching-engine">Order Matching</a>, <a href="/case-studies/35-saga-distributed-transactions">Saga</a>, or <a href="/case-studies/38-kafka-scale-streaming">Kafka Streaming</a>.</p>
+<p class="home-case-more">See all 41 case studies in the catalog below, or jump to <a href="/case-studies/41-amazon-s3-internals">Amazon S3 Internals</a>, <a href="/case-studies/35-saga-distributed-transactions">Saga</a>, or <a href="/case-studies/38-kafka-scale-streaming">Kafka Streaming</a>.</p>
 
 ## Learning path
 
@@ -200,6 +200,7 @@ Every case study trains the same loop so the method becomes automatic.
 | 38 | [Kafka-Scale Streaming](case-studies/38-kafka-scale-streaming.md) | ISR, EOS, rebalancing |
 | 39 | [Global DDoS Mitigation](case-studies/39-global-ddos-mitigation.md) | Anycast, scrubbing, edge defense |
 | 40 | [Email at Scale](case-studies/40-email-at-scale.md) | SMTP, indexing, spam, search |
+| 41 | [Amazon S3 Internals](case-studies/41-amazon-s3-internals.md) | How S3 stores trillions of files |
 
 ## Run & deploy
 

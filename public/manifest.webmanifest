@@ -1,7 +1,7 @@
 {
   "name": "System Design Handbook",
   "short_name": "SysDesign",
-  "description": "Learn system design — 15 fundamentals and 40 case studies with HLD and LLD. Works offline.",
+  "description": "Learn system design — 15 fundamentals and 41 case studies with HLD and LLD. Works offline.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
