@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import { IBM_Plex_Sans, Source_Serif_4 } from 'next/font/google';
-import Sidebar from '@/components/Sidebar';
+import AppShell from '@/components/AppShell';
 import { ThemeProvider } from '@/components/ThemeProvider';
 import PwaInstallPrompt from '@/components/PwaInstallPrompt';
 import './globals.css';
@@ -70,12 +70,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className={`${sans.variable} ${display.variable}`}>
         <ThemeProvider>
           <PwaInstallPrompt />
-          <div className="app-shell">
-            <Sidebar />
-            <main className="main-content">
-              <div className="main-content-inner">{children}</div>
-            </main>
-          </div>
+          <AppShell>{children}</AppShell>
         </ThemeProvider>
       </body>
     </html>
