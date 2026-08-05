@@ -18,7 +18,7 @@ export const navigation: NavSection[] = [
       { title: 'Home', href: '/' },
       { title: 'Live app ↗', href: LIVE_SITE },
       { title: 'How to use this course', href: '/how-to-use' },
-      { title: 'Deploy this site', href: '/deploy' },
+      { title: 'Deploy / Offline PWA', href: '/deploy' },
     ],
   },
   {

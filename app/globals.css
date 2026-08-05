@@ -77,6 +77,73 @@ a {
   color: var(--theme-color);
 }
 
+/* PWA banners */
+.pwa-banner {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem 1rem;
+  padding: 0.65rem 1rem;
+  font-size: 0.88rem;
+  font-weight: 500;
+  text-align: center;
+}
+
+.pwa-banner-offline {
+  background: #422006;
+  color: #fde68a;
+  border-bottom: 1px solid #92400e;
+}
+
+[data-theme='light'] .pwa-banner-offline {
+  background: #fffbeb;
+  color: #78350f;
+  border-bottom-color: #fde68a;
+}
+
+.pwa-banner-install {
+  background: var(--chip-bg);
+  color: var(--chip-text);
+  border-bottom: 1px solid var(--chip-border);
+}
+
+.pwa-banner-actions {
+  display: flex;
+  gap: 0.45rem;
+}
+
+.pwa-btn {
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg-elevated);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.pwa-btn-primary {
+  background: var(--theme-color);
+  border-color: var(--theme-color);
+  color: #fff;
+}
+
+[data-theme='dark'] .pwa-btn-primary {
+  color: #0f172a;
+}
+
+.offline-page .offline-hint {
+  margin-top: 1.5rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
 /* App shell — sidebar left, content centered in remaining space (Facebook-style) */
 .app-shell {
   display: flex;

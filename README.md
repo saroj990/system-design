@@ -210,7 +210,16 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). This is a **Next.js** app — deploy safely to Vercel with `git push`. See [Deploy this site](DEPLOY.md).
+Open [http://localhost:3000](http://localhost:3000). This is a **Next.js** app (and a **PWA**) — deploy to Vercel with `git push`.
+
+### Offline / PWA
+
+1. Build production: `npm run build && npm start`  
+2. Visit lessons while online (they get cached)  
+3. Install the app from the browser (or use the Install banner)  
+4. Turn off the network — previously opened pages still load  
+
+Details: [Deploy this site](DEPLOY.md).
 
 ---
 
