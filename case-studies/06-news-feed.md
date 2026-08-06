@@ -30,31 +30,92 @@ The hard part is not storing a single tweet — it is **delivering the right pos
 - **Eventually consistent** feed for celebrity posts is acceptable
 - Scale to **500M users**, **200M DAU**, heavy read traffic
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+We do rough math so we know **what to optimize**. Exact precision is not the goal — **order of magnitude** is.
 
-- 500M registered users, 200M DAU
-- Each DAU reads feed **5×/day** → **1B feed reads/day**
-- **10%** of DAU post **1 post/day** → **20M posts/day**
-- Average user follows **200** accounts; average post size **~500 bytes** metadata
+### Why we estimate (beginner tip)
+
+Ask three questions:
+1. **How busy?** → QPS (requests per second)
+2. **How much data?** → storage (GB/TB)
+3. **How fat is the pipe?** → bandwidth (MB/s) when media matters
+
+Cheat sheet: **1 QPS ≈ 86,400 requests/day**. Peak is often **2–5×** average.
+
+### Assumptions (say these out loud)
+
+- **500M registered users**, **200M DAU** (daily active users)
+- Each DAU opens their home feed **5×/day** → **1B feed reads/day**
+- **10% of DAU post 1 post/day** → **20M new posts/day**
+- Average user follows **200 accounts**; post metadata ≈ **500 bytes**
+- Precomputed feed cache: top **500 post IDs × 8 bytes ≈ 4 KB** per active user
+
+### Step A — Traffic (QPS)
 
 ```text
-Feed read QPS  ≈ 1B / 86,400 ≈ 12,000/s avg, peak ~60,000/s
-Post write QPS ≈ 20M / 86,400 ≈ 230/s avg, peak ~1,000/s
+Feed read QPS:
+  1B reads/day ÷ 86,400 ≈ 12,000/s average
+  Peak (5× avg)            ≈ 60,000/s
 
-Per-user fan-out on write (naive):
-  200 followers × 20M posts/day ≈ 4B feed-row writes/day ≈ 46,000/s
-  → too expensive for everyone; hybrid approach required
+Post write QPS:
+  20M posts/day ÷ 86,400 ≈ 230/s average
+  Peak (5× avg)            ≈ 1,000/s
 
-Storage (posts only, 5 years):
-  20M/day × 365 × 5 × 500B ≈ 18 TB
+Read:write ratio ≈ 1B / 20M = 50:1 (reads dominate)
 
-Feed cache per active user (if precomputed, 500 post IDs × 8B):
-  200M DAU × 4KB ≈ 800 GB in Redis (upper bound; trim to top 500–1000)
+Naive fan-out on write (push post to every follower):
+  20M posts × 200 followers = 4B feed-row writes/day
+  4B / 86,400 ≈ 46,000 fan-out writes/s  → too expensive for everyone
 ```
 
-**Insight:** Reads dominate. **Precompute feeds for normal users** (fan-out on write). **Pull at read time for celebrities** (fan-out on read).
+### Step B — Storage
+
+```text
+Posts (5 years retention):
+  20M/day × 365 × 5 × 500 bytes ≈ 18 TB
+
+Feed cache (upper bound — all 200M DAU precomputed):
+  200M users × 4 KB ≈ 800 GB in Redis
+  Trim to top 500–1000 post IDs → realistic ~400–800 GB
+
+Social graph (follows):
+  500M users × 200 follows × 16 bytes ≈ 1.6 TB (manageable with sharding)
+```
+
+### Step C — Bandwidth / other (if relevant)
+
+Feed API response (20 posts × ~1 KB JSON each):
+
+```text
+60,000 feed reads/s × 20 KB ≈ 1.2 GB/s peak API egress
+
+Media links (not bytes) in feed — images served from CDN separately
+```
+
+Fan-out worker throughput is the hidden bandwidth cost — **Redis ZADD** ops, not HTTP.
+
+### Step D — Read:write ratio
+
+| Path | Approx share | Implication |
+|------|--------------|-------------|
+| **Home feed read (GET /feed)** | ~99% | Precompute in Redis sorted sets; O(1) lookup |
+| **Create post (POST /posts)** | ~1% | Fast ack to author; async fan-out via queue |
+| **Profile feed read** | Small | Query posts by `author_id` — no fan-out needed |
+| **Follow/unfollow** | Tiny writes | Update graph DB; optional backfill into feed cache |
+
+### What the numbers tell us
+
+- **60k peak feed reads/s** → feed must be a **Redis cache lookup**, not a join across 200 followees at request time
+- **46k fan-out writes/s (naive)** → **hybrid model**: fan-out on write for normal users; pull at read for celebrities (>10k followers)
+- **18 TB posts over 5 years** → shard Posts DB by `post_id` or `author_id`
+- **800 GB feed cache** → Redis cluster; trim ZSETs to top 1000; expire cold users after 7 days
+- **Async fan-out via Kafka/SQS** → post creation returns in <200 ms; workers push post IDs to follower feeds
+- **Snowflake post IDs** → time-ordered without extra index column
+
+### Common mistake for this problem
+
+Using **fan-out on write for every user**, including celebrities with 50M followers. One post would trigger 50M Redis writes — use **fan-out on read (pull)** for high-follower accounts and merge at read time.
 
 ## 4. High-Level Design (HLD)
 

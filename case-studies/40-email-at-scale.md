@@ -45,33 +45,141 @@ The hard part is not delivering one email — it is **reliable pipeline orchestr
 
 ## 3. Back-of-the-envelope
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a Gmail SRE runbook. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day** (86,400 seconds in a day). Email at scale is **extreme ingest volume** with a **read path that must feel instant** — the surprise is that inbox load and search indexing dominate, not SMTP wire protocol.
 
-- 1.5B active mailboxes; **50 emails/user/day** received (incl. spam filtered)  
-- Average stored message **50 KB** (body + headers; attachments extra in blob store)  
-- 30% messages have **500 KB** attachment → blended avg **200 KB** stored per message  
+### Why we estimate
+
+Gmail-class email must **ingest ~1M msg/s**, **store petabytes**, and serve **sub-second inbox loads**. Estimates tell us:
+
+- Whether **SMTP ingest pipeline** or **inbox read cache** is the real bottleneck  
+- Why **search is an inverted index problem** separate from mail storage  
+- How **spam filtering at ingest scale** requires its own GPU/CPU fleet  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Active mailboxes | 1.5B | Global user base |
+| Emails received/user/day | 50 | Includes spam filtered before inbox |
+| Avg message body+headers | 50 KB | Text + headers (attachments separate) |
+| Messages with attachments | 30% | 500 KB avg attachment |
+| Blended stored size/msg | 200 KB | Body + attachment share |
+| Stored messages (total) | 300B | Historical archive |
+| Inbox opens/user/day | 3 | Read path driver |
+| Peak ingest multiplier | 3× average | Morning email rush worldwide |
+
+### Step A — Traffic (QPS / throughput) with labeled arithmetic
+
+**Inbound SMTP ingest:**
 
 ```text
-Inbound SMTP ≈ 1.5B × 50 / 86,400 ≈ 870,000 msg/s (before spam drop)
-  Peak ~3M msg/s
+Messages/day      = 1.5B mailboxes × 50 emails = 75,000,000,000/day
+Avg inbound SMTP  = 75B ÷ 86,400
+                  ≈ 870,000 messages/second
 
-Storage growth ≈ 870k × 200 KB × 86,400 ≈ 15 PB/day raw
-  With dedupe/compression/index overhead ×1.5 ≈ 22 PB/day (tiered; not all hot)
-
-Hot index for search:
-  300B messages × 200 B doc id/terms pointer ≈ 60 TB inverted index shards (compressed)
-
-Inbox read:
-  1.5B users × 3 inbox opens/day ≈ 4.5B reads/day ≈ 52,000 QPS avg, peak 250k QPS
-
-Thread metadata per user:
-  avg 500 active threads × 200 B ≈ 100 KB/user hot cache → 150 TB if all resident (use LRU)
-
-Spam model inference:
-  3M/s × 2 ms GPU batch ≈ need large CPU/GPU fleet or heavy feature caching
+Peak (×3 morning rush worldwide):
+                  ≈ 3,000,000 messages/second
+  (Before spam drop — spam filter removes a large fraction before inbox)
 ```
 
-**Insight:** **Separate the mail pipeline (async) from the read path (cached views)**. Search is an **inverted index problem**; inbox is a **precomputed thread list + snippet cache**.
+**Inbox read QPS:**
+
+```text
+Inbox opens/day = 1.5B × 3 = 4.5B reads/day
+Avg read QPS    = 4.5B ÷ 86,400 ≈ 52,000 reads/second
+Peak (×5)       ≈ 250,000 reads/second
+```
+
+**Search QPS (assume 10% of inbox opens trigger search):**
+
+```text
+450M searches/day → ~5,200 searches/second average
+```
+
+### Step B — Storage
+
+**Daily storage growth:**
+
+```text
+870K msg/s × 200 KB × 86,400 s/day
+  = 870,000 × 200 KB × 86,400
+  ≈ 15 PB/day raw
+
+With dedupe/compression/index overhead ×1.5 ≈ 22 PB/day gross
+  → Tiered: hot (recent) vs warm vs cold; not all on SSD
+```
+
+**Total stored mail (historical):**
+
+```text
+300B messages × 200 KB blended ≈ 60 PB logical
+  Requirement says 50 PB — same order of magnitude
+```
+
+**Inverted index for search:**
+
+```text
+300B messages × 200 B doc-id/terms pointer ≈ 60 TB inverted index (compressed)
+  → Sharded by userId; each shard serves search for its user partition
+```
+
+**Thread metadata hot cache:**
+
+```text
+500 active threads/user × 200 B ≈ 100 KB/user
+1.5B users × 100 KB ≈ 150 TB if all resident
+  → LRU cache; only active users hot (~100M DAU → ~10 TB hot thread cache)
+```
+
+### Step C — Bandwidth / other
+
+**Spam model inference at ingest:**
+
+```text
+3M msg/s peak × 2 ms per GPU batch inference
+  → Large CPU/GPU fleet OR heavy feature caching + lightweight first-pass filter
+  Two-stage: cheap rules → expensive ML on suspicious subset
+```
+
+**Attachment blob store:**
+
+```text
+30% of 870K msg/s × 500 KB ≈ 130 GB/s attachment ingest (peak higher)
+  → Object storage (S3-like); dedupe by content hash
+```
+
+**Inbox API response (read path):**
+
+```text
+50 threads × ~2 KB per thread snippet ≈ 100 KB per inbox page
+250K peak read QPS × 100 KB ≈ 25 GB/s inbox egress
+  → Precomputed thread list + snippet cache; not DB join at read time
+```
+
+### Step D — Ratios and capacity table
+
+| Metric | Average | Peak | Notes |
+|--------|---------|------|-------|
+| SMTP ingest | ~870K msg/s | ~3M msg/s | Before spam filter |
+| Inbox read QPS | ~52K/s | ~250K/s | Precomputed thread list |
+| Search QPS | ~5.2K/s | ~26K/s | Inverted index shards |
+| Storage growth/day | ~15 PB | — | ×1.5 with index overhead |
+| Total stored mail | ~50–60 PB | — | 300B messages |
+| Inverted index | ~60 TB | — | Compressed term pointers |
+| Ingest:read ratio | ~17:1 | — | Pipeline vs read path |
+
+### What the numbers tell us
+
+- **Separate mail pipeline (async ingest) from read path (cached views)** — never query raw store for inbox load  
+- **870K msg/s ingest is the write monster** → async pipeline: MX → spam → store → index → notify  
+- **250K inbox read QPS peak** → precomputed thread list + snippet cache; p99 < 500 ms  
+- **60 TB inverted index** → sharded search; p99 < 300 ms for typical queries  
+- **Spam at 3M msg/s peak** → two-stage filter; ML only on suspicious subset  
+- **15 PB/day growth** → tiered storage; attachments in object store with content-hash dedupe  
+
+### Common mistake for this problem
+
+Designing inbox load as **SQL JOIN across messages table** — at 250K read QPS, you need **precomputed thread views** cached per user. Interviewers want: ingest pipeline writes thread metadata asynchronously; read path hits cache. Another mistake: running **full ML spam classification on every one of 3M msg/s** — use cheap rules first, ML on the suspicious ~10–20% subset.
 
 ## 4. High-Level Design (HLD)
 

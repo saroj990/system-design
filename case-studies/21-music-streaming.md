@@ -31,28 +31,152 @@ Users discover songs, play them with minimal buffering, and build personal playl
 - Licensing checks before every stream URL is issued  
 - High availability for playback path  
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day** (86,400 seconds in a day). Traffic rarely stays flat; **peak is often 2–5× average** (evenings, album drops, commute hours).
 
-- 50M monthly active users (MAU)  
-- Average 30 streams/user/day  
-- Average track size ≈ 5 MB (128 kbps, ~5 min)  
-- Catalog ≈ 80M tracks metadata; audio in object storage  
+### Why we estimate
+
+Music streaming looks like “one app” but is really **two systems**:
+
+- A **metadata path** (search, playlists, licensing) — small JSON, DB/cache friendly  
+- An **audio path** (actual bytes) — huge bandwidth, must never flow through app servers  
+
+Estimates tell us whether to optimize Postgres, Redis, CDN, or object storage — and prove that **streams dominate reads** while playlist edits are tiny.
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Monthly active users (MAU) | 50M | Base for daily stream volume |
+| Streams per user per day | 30 | Each stream triggers play URL + CDN fetch |
+| Catalog size | 80M tracks | Metadata DB + cold audio in S3 |
+| Average track audio size | 5 MB (128 kbps, ~5 min) | Object storage and CDN egress |
+| Metadata per track | ~2 KB | Fits Postgres + search index |
+| Users editing playlists | 10% of MAU, 2 edits/day | Write path to DB |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Stream starts (play URL requests — API path):**
 
 ```text
-Stream events/day ≈ 50M × 30 = 1.5B
-Stream QPS (avg) ≈ 1.5B / 86400 ≈ 17,000/s
-Peak stream QPS ≈ 3× avg ≈ 50,000/s
+Streams per day     = 50M users × 30 streams/user
+                    = 1.5 billion streams/day
 
-Catalog metadata ≈ 80M × ~2 KB ≈ 160 GB (+ indexes)
-Audio storage ≈ 80M × 5 MB ≈ 400 TB (cold object storage)
+Average stream QPS  = 1.5B ÷ 86,400
+                    ≈ 17,400 requests/second
 
-Playlist writes: assume 10% users edit 2 playlists/day
-Write QPS ≈ (5M × 2) / 86400 ≈ 115/s (low vs reads)
+Peak stream QPS (3×) ≈ 17,400 × 3
+                     ≈ 52,000 requests/second
 ```
 
-Insight: **separate metadata path from audio bytes** — metadata in DB/cache; audio from CDN/object storage.
+Each “stream” is one `POST /tracks/:id/play` (licensing check + signed CDN URL). The **audio bytes** do not hit your API — the client pulls from CDN separately.
+
+**Search and browse (catalog reads):**
+
+```text
+Assume 5 catalog API calls per stream (search, album, artist, playlist load)
+
+Catalog read QPS (avg) = 17,400 × 5 ≈ 87,000/s
+Peak (3×)              ≈ 260,000/s
+```
+
+Hot slices cache well; search index handles full-text.
+
+**Playlist writes:**
+
+```text
+Editing users/day   = 50M × 10% = 5M users
+Edits per day       = 5M × 2 = 10M writes/day
+
+Write QPS (avg)     = 10M ÷ 86,400 ≈ 115 writes/second
+Peak (3×)           ≈ 350 writes/second
+```
+
+### Step B — Storage
+
+**Track metadata (Postgres + indexes):**
+
+```text
+Rows              = 80M tracks
+Bytes per row     ≈ 2 KB (title, artist, album, duration, storage_key)
+
+Raw metadata      = 80M × 2 KB ≈ 160 GB
+With indexes (~2×) ≈ 320 GB — fits a large Postgres cluster or sharded by track_id
+```
+
+**Audio (object storage — the big number):**
+
+```text
+Audio storage     = 80M tracks × 5 MB/track
+                  ≈ 400 TB (cold S3/GCS; lifecycle tiers for archival)
+```
+
+**Play events / analytics (append-only, 1 year):**
+
+```text
+Events/day        = 1.5B play events
+Row size          ≈ 100 B (user_id, track_id, timestamp, region)
+
+Per day           = 1.5B × 100 B ≈ 150 GB/day
+Per year          ≈ 55 TB → stream to columnar warehouse; don’t keep all in Postgres
+```
+
+**Playlists:**
+
+```text
+Assume 20M playlists × ~1 KB metadata + avg 50 tracks × 8 B each
+Order of magnitude ≈ tens of GB — negligible vs audio
+```
+
+### Step C — Bandwidth and other resources
+
+**CDN egress (where the real bits move):**
+
+```text
+Streams/day           = 1.5B
+Bytes per full listen ≈ 5 MB (assume most users finish ~80% → use 4 MB effective)
+
+Daily CDN egress      = 1.5B × 4 MB ≈ 6 PB/day average
+Average bitrate       ≈ 6 PB ÷ 86,400 s ≈ 70 GB/s ≈ 560 Gbps sustained average
+Peak (3× evenings)    ≈ 1.7 TB/s ≈ 1,700 Gbps — must be almost entirely CDN cache hits
+```
+
+**API bandwidth (JSON only — small):**
+
+```text
+Play URL response     ≈ 500 B JSON
+Peak play QPS         ≈ 52,000/s
+
+API egress (play)     = 52,000 × 500 B ≈ 26 MB/s — trivial vs CDN
+```
+
+**Licensing checks:** one indexed lookup per play (~52k/s peak) — cache hot track+region pairs in Redis.
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Avg QPS | Peak QPS | Notes |
+|-----------|------|---------|----------|-------|
+| Start stream (play URL) | Read + license check | ~17,400 | ~52,000 | Gate before CDN URL |
+| CDN audio delivery | Read (edge) | N/A (CDN) | ~560 Gbps+ | Never through API |
+| Search / browse catalog | Read | ~87,000 | ~260,000 | Cache + search index |
+| Edit playlist | Write | ~115 | ~350 | Transactional Postgres |
+| Play event log | Write (async) | ~17,400 | ~52,000 | Queue → analytics |
+
+**Overall ratio:** catalog + stream reads **>>** playlist writes (~150:1 on API writes). Audio bandwidth is a separate, much larger dimension.
+
+### What the numbers tell us
+
+- **Never stream audio through app servers** — 400 TB catalog and petabyte-scale daily CDN egress require S3 + CDN with signed URLs  
+- **Licensing at play time** (~52k checks/s peak) needs fast lookups (Redis cache of track+region → allowed/denied)  
+- **Metadata (~160 GB) is manageable**; shard by `track_id` only when catalog grows past 100M+  
+- **Playlist writes (~350/s peak) fit one Postgres** with optimistic locking — don’t over-engineer sharding here  
+- **Play analytics (150 GB/day)** belongs in Kafka + warehouse, not blocking the playback path  
+- **Peak factor matters** — Friday 6 PM can be 3–5× average; CDN pre-warm new releases
+
+### Common mistake for this problem
+
+Putting **audio files in Postgres or proxying streams through the API** “for control.” At 17k+ plays/sec, origin bandwidth explodes. Another mistake: checking licensing only at browse time — rights expire and vary by region; **every play URL** must re-validate. Finally, treating **playlist writes** as the scaling bottleneck when **CDN + licensing reads** dominate.
 
 ## 4. High-Level Design (HLD)
 

@@ -34,28 +34,156 @@ Direct peer-to-peer works for 2 people but breaks down at 5+ participants — yo
 - Scale horizontally by meeting room  
 - Privacy: only invited users join (tokens, waiting room)  
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. **1 QPS ≈ 86,400 events/day** applies to signaling; media is measured in **Mbps per participant**, not requests alone. Peak hours (workday mornings) often **2–3× average** concurrent meetings.
 
-- 100K concurrent meetings at peak  
-- Average 8 participants per meeting  
-- 720p video ~ 1.5 Mbps uplink per sender; SFU forwards selectively  
+### Why we estimate
+
+Video conferencing has two paths:
+
+- **Signaling** (join, ICE, mute) — low QPS, must be reliable  
+- **Media** (audio/video bytes) — enormous bandwidth; dominates cost  
+
+Estimates prove why **SFU (Selective Forwarding Unit)** beats MCU mixing and why P2P fails beyond ~4 participants.
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Concurrent meetings at peak | 100K | Horizontal scale unit = room |
+| Average participants per meeting | 8 | SFU fan-out multiplier |
+| Video quality | 720p | ~1.5 Mbps uplink per active sender |
+| Audio bitrate | ~50 Kbps | Always-on alongside video |
+| SFU selective forward | ~2 Mbps down per participant | Simulcast — not full N×N mesh |
+| Signaling events per join | ~10 (SDP, ICE candidates) | WebSocket load |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Concurrent participants:**
 
 ```text
-Concurrent participants ≈ 100K × 8 = 800K
-
-Per participant (SFU model):
-  Upload: 1 stream up to SFU (~1.5 Mbps video + 50 Kbps audio)
-  Download: N-1 forwarded streams, but simulcast/layer selection → ~2–4 Mbps typical
-
-SFU egress per 8-person room ≈ 8 uploads in, ~8×2 Mbps selective out ≈ 16 Mbps/room
-100K rooms × 16 Mbps ≈ 1.6 Tbps peak (distributed across regions)
-
-Signaling QPS: join/leave/ICE updates ≈ low thousands/s (not the bottleneck)
+Participants peak   = 100K meetings × 8 participants/meeting
+                    = 800,000 concurrent users
 ```
 
-Insight: **media bandwidth dominates** — use SFU (not MCU mixing), simulcast, and regional edge servers.
+**Meeting join/leave (signaling writes):**
+
+```text
+Assume average meeting duration 30 min
+Meetings started per hour ≈ 100K (steady state at peak concurrency)
+
+Join events per hour    ≈ 800K participants joining (rough turnover)
+Join QPS (avg)          ≈ 800,000 ÷ 3,600
+                        ≈ 220 joins/second
+
+With ICE renegotiations (10× per session):
+Signaling QPS (peak)    ≈ 2,000–5,000 messages/second — WebSocket cluster, not the bottleneck
+```
+
+**In-meeting control (mute, camera toggle):**
+
+```text
+Assume 2 control events/user/minute
+Control QPS           = 800K × 2 ÷ 60
+                      ≈ 27,000 events/second — still small JSON on WebSocket
+```
+
+Signaling is **low thousands of QPS** — media bandwidth is the real scale problem.
+
+### Step B — Storage
+
+**Meeting metadata (Postgres/Redis):**
+
+```text
+Active meetings     = 100K
+Row size            ≈ 500 B (meeting_id, host, tokens, created_at)
+
+Active meeting state ≈ 100K × 500 B ≈ 50 MB — trivial in Redis
+```
+
+**Participant state:**
+
+```text
+Participants        = 800K
+State per user      ≈ 200 B (mute, video on, connection_id)
+
+Participant state   = 800K × 200 B ≈ 160 MB in Redis
+```
+
+**Recording (out of scope for MVP but for scale context):**
+
+```text
+If recording 10% of meetings:
+  8 Mbps stream × 100K × 10% ≈ 80 Gbps ingest to storage — separate pipeline
+MVP: no recording → storage negligible
+```
+
+**Chat messages (optional):**
+
+```text
+Assume 1 msg/participant/minute × 800K ≈ 13K msg/s
+~200 B each → 2.6 MB/s → Kafka + short retention
+```
+
+### Step C — Bandwidth and other resources
+
+**Per-participant media (SFU model):**
+
+```text
+Upload (to SFU)       ≈ 1.5 Mbps video + 0.05 Mbps audio ≈ 1.55 Mbps per sender
+Download (from SFU)   ≈ 2 Mbps (selective layers, not full 7× streams)
+```
+
+**Per 8-person room:**
+
+```text
+Upload into SFU       = 8 × 1.55 Mbps ≈ 12.4 Mbps
+SFU egress (forward)  ≈ 8 participants × 2 Mbps ≈ 16 Mbps
+Total room bandwidth  ≈ 28 Mbps (SFU sees 12 in + 16 out)
+```
+
+**Global peak (100K concurrent meetings):**
+
+```text
+SFU egress peak       = 100K rooms × 16 Mbps
+                      ≈ 1.6 Tbps
+
+Distributed across ~20 regions:
+  Per region          ≈ 80 Gbps — dedicated media servers + Anycast routing
+```
+
+**Why not mesh P2P for 8 users:**
+
+```text
+Each user uploads to 7 peers = 7 × 1.5 Mbps ≈ 10.5 Mbps uplink
+Many home connections fail → SFU centralizes upload once
+```
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Volume @ peak | Notes |
+|-----------|------|---------------|-------|
+| WebRTC media (audio/video) | Read/write (UDP) | ~1.6 Tbps egress | SFU forwarding |
+| Join meeting / ICE signaling | Write + read | ~2K–5K msg/s | WebSocket |
+| Mute / camera control | Write | ~27K events/s | Broadcast to room |
+| Participant list fetch | Read | ~220/s | On join + refresh |
+| TURN relay (fallback) | Relay | ~10–20% of users | When UDP blocked |
+
+**Ratio:** signaling is **tiny** vs media — don’t optimize WebSocket before SFU capacity.
+
+### What the numbers tell us
+
+- **Media (~1.6 Tbps peak) dominates** — SFU per region, simulcast (multiple quality layers), adaptive bitrate  
+- **800K concurrent participants** → scale by **meeting room** (shard SFU by `meeting_id`)  
+- **Signaling (~5K msg/s)** is easy — separate signaling cluster from media servers  
+- **~160 MB Redis** for participant state — ephemeral; no need for durable DB on hot path  
+- **TURN servers** for ~10–20% of users behind strict NAT — budget extra bandwidth  
+- **720p @ 1.5 Mbps** — disable video on congested links; audio-only ≈ 50 Kbps
+
+### Common mistake for this problem
+
+Using **MCU (mix all streams into one)** at 800K participants — CPU to decode/re-encode explodes. Another mistake: **full mesh P2P** for 8+ users — uplink requirements kill mobile clients. Finally, running **media through the same API servers** as REST — signaling and media must be separate tiers.
 
 ## 4. High-Level Design (HLD)
 

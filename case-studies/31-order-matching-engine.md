@@ -45,33 +45,141 @@ A naive database-backed design cannot sustain millions of orders/day with sub-mi
 
 ## 3. Back-of-the-envelope
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a trading-floor capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day** (86,400 seconds in a day). Exchange traffic is spiky — **peak is often 3–5× average**, and a handful of hot symbols can absorb most of the volume.
 
-- 5,000 listed symbols  
-- 500M orders/day, 50M trades/day  
-- Average order message 200 bytes; trade 150 bytes  
-- 200 hot symbols drive 80% of volume  
+### Why we estimate
+
+An order matching engine has two worlds: **calm symbols** (small books, few updates) and **hot symbols** (NASDAQ opening, BTC-USD during volatility). Estimates tell us:
+
+- Whether **matching CPU** or **durable logging** is the real bottleneck  
+- If we need **one thread per symbol** vs shared pools  
+- How much **in-memory book state** and **market-data fan-out** actually cost  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Listed symbols | 5,000 | Each symbol can be an independent matching shard |
+| Orders per day | 500M | Primary write load on the engine |
+| Trades per day | 50M | ~10% of orders result in fills (rest cancel/reject/rest) |
+| Hot symbols | 200 (drive ~80% of volume) | Tail latency and fan-out concentrate here |
+| Avg order message | 200 B | Durable event log sizing |
+| Avg trade message | 150 B | Trade reporting + market data |
+| Peak multiplier | 5× average | Market open, macro news, crypto volatility |
+
+### Step A — Traffic (QPS / throughput) with labeled arithmetic
+
+**Average order rate (all symbols combined):**
 
 ```text
-Avg order rate  ≈ 500M / 86,400 ≈ 5,800 orders/s
-Peak (×5)       ≈ 29,000 orders/s aggregate
-Hot symbol peak ≈ 10,000 orders/s per symbol
+Orders per day     = 500,000,000
+Seconds per day    = 86,400
 
-Trades/s avg    ≈ 50M / 86,400 ≈ 580/s
-
-In-memory book per symbol (rough):
-  10 price levels × 100 orders/level × 64 B ≈ 64 KB (small)
-  Deep book 10K resting orders × 64 B ≈ 640 KB
-
-Durable log/day ≈ 500M × 200 B ≈ 100 GB raw (+ trades 7.5 GB)
-  → Kafka/Pulsar with 3× replication; compacted snapshots hourly
-
-Network fan-out (market data):
-  200 hot symbols × 10K updates/s × 100 B ≈ 200 MB/s to internal bus
-  External subscribers via filtered multicast / WebSocket gateways
+Avg order QPS      = 500M ÷ 86,400
+                   ≈ 5,800 orders/second
 ```
 
-Insight: **one matching thread (or shard) per symbol** owns the book — no locks on the hot path; durability via **append-only event log** + periodic snapshots.
+**Peak aggregate order rate:**
+
+```text
+Peak order QPS     = 5,800 × 5
+                   ≈ 29,000 orders/second (global)
+```
+
+**Hot symbol peak (design target from requirements):**
+
+```text
+Hot symbol peak    ≈ 10,000 orders/second per symbol
+  (200 hot symbols × uneven distribution — a few symbols may hit this ceiling)
+```
+
+**Trade rate (fills emitted):**
+
+```text
+Trades per day     = 50,000,000
+Avg trade QPS      = 50M ÷ 86,400
+                   ≈ 580 trades/second
+
+Peak trade QPS     ≈ 580 × 5 ≈ 2,900 trades/second
+```
+
+**Market-data updates (BBO + depth changes):**
+
+```text
+Each order may touch 1–3 book levels → assume ~2 updates per order on hot symbols
+
+Hot path updates   ≈ 200 symbols × 10,000 orders/s × 2 updates
+                   ≈ 4M book updates/s (internal, before filtering to external subscribers)
+```
+
+### Step B — Storage
+
+**In-memory order book (per symbol — the hot path lives in RAM, not disk):**
+
+```text
+Small book (typical):
+  10 price levels × 100 orders/level × 64 B ≈ 64 KB
+
+Deep book (hot symbol during volatility):
+  10,000 resting orders × 64 B ≈ 640 KB per symbol
+
+All 5,000 symbols (worst-case deep):
+  5,000 × 640 KB ≈ 3.2 GB total in-memory books (usually far less — most symbols are thin)
+```
+
+**Durable event log (crash recovery — this is the disk story):**
+
+```text
+Orders/day         = 500M × 200 B ≈ 100 GB/day raw order events
+Trades/day         = 50M × 150 B ≈ 7.5 GB/day
+
+With 3× replication ≈ 320 GB/day on the log cluster
+  → Hourly snapshots + log compaction; replay must restore identical book state
+```
+
+### Step C — Bandwidth / other
+
+**Market-data fan-out to internal bus (hot symbols only):**
+
+```text
+200 hot symbols × 10,000 updates/s × 100 B per update
+  ≈ 200 MB/s to internal pub/sub
+
+External subscribers (filtered multicast / WebSocket gateways):
+  Thousands of clients × subset of symbols → edge filtering required;
+  unfiltered fan-out would be orders of magnitude larger
+```
+
+**Matching latency budget:**
+
+```text
+Target p99 < 1 ms per order → entire match path must stay in L3 cache + RAM
+  No DB round-trip on hot path; durability is async append to replicated log
+```
+
+### Step D — Ratios and capacity table
+
+| Metric | Average | Peak | Notes |
+|--------|---------|------|-------|
+| Order ingest QPS | ~5,800/s | ~29,000/s | Aggregate across all symbols |
+| Per hot symbol QPS | ~230/s avg | ~10,000/s | 80/20 rule — design for tail |
+| Trade (fill) QPS | ~580/s | ~2,900/s | Lower than orders — many cancel/reject |
+| Order:trade ratio | ~10:1 | ~10:1 | Most orders don't immediately fill |
+| In-memory book | 64 KB–640 KB/symbol | — | Hot symbols need deep book structs |
+| Durable log/day | ~100 GB raw | — | 3× replicated ≈ 320 GB/day |
+
+### What the numbers tell us
+
+- **Hot symbols (~10K orders/s each) dominate design** → one matching thread (or dedicated shard) per symbol; no cross-symbol locks on the hot path  
+- **~580 trades/s average is modest; ~5,800 orders/s is the real throughput problem** → optimize order insert, cancel, and replace in the book  
+- **In-memory books are tiny (KB–MB per symbol)** → RAM is not the bottleneck; **CPU + ordering + log durability** are  
+- **~100 GB/day event log** → append-only Kafka/Pulsar with snapshots; replay must reproduce identical fill sequence  
+- **~200 MB/s internal market-data bus** → filter at the edge; external clients never see raw 4M updates/s  
+- **Sub-millisecond p99** → matching stays in-process; persistence is **async after** the match decision  
+
+### Common mistake for this problem
+
+Designing matching around a **shared relational database** with row locks. Interviewers want **single-writer per symbol**, in-memory price-time priority queues, and an **append-only event log** for crash recovery — not `SELECT FOR UPDATE` on a `orders` table. Another mistake: treating **trade QPS** as equal to **order QPS**; most orders cancel, rest, or partially fill without immediately generating a trade.
 
 ## 4. High-Level Design (HLD)
 

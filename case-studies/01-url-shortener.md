@@ -26,20 +26,89 @@ Users paste a long URL and receive a short URL. Opening the short URL redirects 
 - Short codes reasonably unique and hard to guess at scale  
 - High availability for redirects  
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+We do rough math so we know **what to optimize**. Exact precision is not the goal — **order of magnitude** is.
 
-- 100M new URLs/month  
-- Read:write ≈ 100:1  
+### Why we estimate (beginner tip)
+
+Ask three questions:
+1. **How busy?** → QPS (requests per second)
+2. **How much data?** → storage (GB/TB)
+3. **How fat is the pipe?** → bandwidth (MB/s) when media matters
+
+Cheat sheet: **1 QPS ≈ 86,400 requests/day**. Peak is often **2–5×** average.
+
+### Assumptions (say these out loud)
+
+- **100M new short URLs per month** (creates / writes)
+- Each redirect is a **read**; people click links far more than they create them
+- **Read:write ratio ≈ 100:1** (100 redirects for every 1 create)
+- Each stored row ≈ **500 bytes** (`short_code`, `long_url`, timestamps, indexes)
+- Redirect responses are tiny (HTTP 302 + headers) — bandwidth is not the bottleneck
+
+### Step A — Traffic (QPS)
 
 ```text
-Write QPS ≈ 100M / 2.5e6 ≈ 40/s (avg), peak ~200/s
-Read QPS ≈ 4,000/s avg, peak ~20,000/s
-Storage/year ≈ 100M × 12 × ~500B ≈ 600GB (+ indexes)
+Seconds per month ≈ 30 days × 86,400 ≈ 2.6 million
+
+Write QPS (creates):
+  100M creates / month ÷ 2.6M seconds ≈ 40/s average
+  Peak (5× avg)                         ≈ 200/s
+
+Read QPS (redirects):
+  40 writes/s × 100 read:write ratio   ≈ 4,000/s average
+  Peak (5× avg)                         ≈ 20,000/s
+
+Daily sanity check:
+  100M / month ≈ 3.3M creates/day  →  3.3M / 86,400 ≈ 38/s  ✓
+  3.3M × 100 ≈ 330M redirects/day  →  ~3,800/s average      ✓
 ```
 
-Insight: **optimize the redirect path** with caching.
+### Step B — Storage
+
+```text
+New rows per year:
+  100M/month × 12 months = 1.2 billion URLs/year
+
+Raw data:
+  1.2B rows × 500 bytes ≈ 600 GB/year (mapping data only)
+
+With indexes (+50–100%):
+  Plan for ~1 TB/year for URL mappings
+
+Analytics (click events) can grow faster — store separately, not in the hot redirect path
+```
+
+### Step C — Bandwidth / other (if relevant)
+
+Redirect responses are **~500 bytes–1 KB** each (302 + `Location` header). At 20,000 peak redirect QPS:
+
+```text
+20,000/s × 1 KB ≈ 20 MB/s egress — modest for a load balancer tier
+```
+
+Bandwidth is **not** the first problem here. **Read QPS** is.
+
+### Step D — Read:write ratio
+
+| Path | Approx share | Implication |
+|------|--------------|-------------|
+| **Redirect (GET /r/:code)** | ~99% of traffic | Must be fast; cache aggressively (Redis) |
+| **Create (POST /urls)** | ~1% of traffic | Can tolerate slightly higher latency |
+| **Stats / admin reads** | Tiny | Async aggregates OK |
+
+### What the numbers tell us
+
+- **~20k peak read QPS** → Redis cache for `code → long_url` is essential; DB should not serve every redirect
+- **Only ~200 peak write QPS** → a single Postgres primary can handle creates for a long time
+- **~600 GB–1 TB/year** → one DB shard is fine initially; shard by `hash(short_code)` only when rows hit billions
+- **Click analytics** are fire-and-forget → queue + workers so redirects never wait on stats writes
+- **100:1 read:write** is the classic cache-friendly shape — optimize reads first
+
+### Common mistake for this problem
+
+Beginners put click counting **inside the redirect path** (sync DB write on every click). That turns a 99% read workload into a write-heavy one and kills latency — enqueue clicks asynchronously instead.
 
 ## 4. High-Level Design (HLD)
 

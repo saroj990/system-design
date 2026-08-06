@@ -36,32 +36,98 @@ This is a **geospatial + real-time** problem: location updates are frequent, mat
 - **Strong consistency** for driver assignment — one driver, one active trip
 - **99.9% availability** in supported cities
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+We do rough math so we know **what to optimize**. Exact precision is not the goal — **order of magnitude** is.
 
-- 10M rides/day; average trip **20 min**, **8 km**
-- 500k drivers online peak; each sends GPS **every 3 s** → **167k location writes/s**
-- Match radius **3 km**; average **20 drivers** in radius per request in cities
-- 10M rides × 20 min ≈ **140k concurrent active trips** peak fraction lower
+### Why we estimate (beginner tip)
+
+Ask three questions:
+1. **How busy?** → QPS (requests per second)
+2. **How much data?** → storage (GB/TB)
+3. **How fat is the pipe?** → bandwidth (MB/s) when media matters
+
+Cheat sheet: **1 QPS ≈ 86,400 requests/day**. Peak is often **2–5×** average.
+
+### Assumptions (say these out loud)
+
+- **10M rides/day** completed; average trip **20 minutes**, **8 km**
+- **500k drivers online at peak**; each sends GPS **every 3 seconds**
+- Match search radius **3 km**; ~**20 candidate drivers** per request in dense cities
+- Trip metadata row ≈ **2 KB** (pickup, dropoff, status, fare, timestamps)
+- Location pings ≈ **100 bytes** each (lat, lng, heading, timestamp)
+- Rush hour creates **5×** average ride-request load
+
+### Step A — Traffic (QPS)
 
 ```text
-Ride request QPS ≈ 10M / 86,400 ≈ 115/s avg, peak ~500/s (rush hour)
+Ride request QPS:
+  10M / day ÷ 86,400 ≈ 115/s average
+  Peak (5× avg, rush hour) ≈ 500/s
 
-Location update QPS ≈ 500k drivers / 3 ≈ 167,000/s
-  → cannot write every GPS ping to SQL; use Redis geospatial + async archival
+Location update QPS (the big number):
+  500k drivers / 3 sec interval ≈ 167,000 writes/s
+  → cannot write every GPS ping to SQL
 
-Geospatial queries:
-  500/s match requests × 20 candidates ≈ 10k point lookups/s (Redis GEORADIUS handles this)
+Geospatial match queries:
+  500 match requests/s × 20 candidates ≈ 10,000 driver lookups/s
+  Redis GEORADIUS handles this in sub-millisecond per query
 
-Trip storage/year:
-  10M × 365 × 2KB metadata ≈ 7 TB
-
-Location history (if stored 24h for dispute):
-  167k/s × 100B × 86400 ≈ 1.4 TB/day → Kafka + short retention, not permanent DB
+Concurrent active trips:
+  10M rides × 20 min avg / 1,440 min/day ≈ 140k concurrent (peak fraction lower)
 ```
 
-**Insight:** **Redis GEORADIUS** (or similar) for hot driver locations; **trip state in DB with strong locking** for assignment; **WebSockets** for live map updates.
+### Step B — Storage
+
+```text
+Trip metadata (1 year):
+  10M/day × 365 × 2 KB ≈ 7 TB
+
+Location history (24h retention for disputes):
+  167k pings/s × 100 bytes × 86,400 sec ≈ 1.4 TB/day
+  → stream to Kafka with short retention; NOT permanent SQL rows
+
+Redis geospatial index (hot):
+  500k drivers × ~100 bytes ≈ 50 MB — trivial in memory
+  Driver metadata hashes: 500k × 200 bytes ≈ 100 MB
+```
+
+### Step C — Bandwidth / other (if relevant)
+
+WebSocket location broadcast during active trips:
+
+```text
+140k active trips × 1 ping/3s × 100 bytes ≈ 4.7 MB/s realtime push
+
+Kafka location stream (all drivers, for analytics/ETA):
+  167k/s × 100 bytes ≈ 16.7 MB/s ingest — manageable with partitioning
+```
+
+Ride matching is **latency-sensitive**, not bandwidth-heavy.
+
+### Step D — Read:write ratio
+
+| Path | Approx share | Implication |
+|------|--------------|-------------|
+| **GPS location write** | ~99.7% of write ops | Redis GEOADD hot path; Kafka archive; skip SQL per ping |
+| **GEORADIUS match read** | ~500/s at peak | Sub-ms in Redis; filter by `available` status |
+| **Trip state transitions** | ~115/s avg | Strong consistency in Postgres with row locks |
+| **WebSocket push (read to client)** | Per active trip | Broadcast driver location to rider map |
+
+Location writes dominate — trip CRUD is tiny by comparison.
+
+### What the numbers tell us
+
+- **167k location writes/s** → **Redis GEORADIUS** for hot driver positions; never sync every ping to Postgres
+- **500 peak ride requests/s** → greedy nearest-driver match is fine for MVP; GEORADIUS + filter in <5 ms
+- **Strong assignment semantics** → DB `SELECT FOR UPDATE` + Redis assign lock so one driver can't accept two rides
+- **Kafka for location stream** → analytics, ETA ML, 24h dispute archive with TTL
+- **WebSockets** for live map updates to rider and driver during trip
+- **City sharding** → separate Redis cluster per metro; matching stays local
+
+### Common mistake for this problem
+
+Writing **every GPS ping to Postgres** for durability. At 167k inserts/s, the DB melts — keep hot locations in **Redis Geo**, stream to Kafka for analytics, and only persist trip state transitions to SQL.
 
 ## 4. High-Level Design (HLD)
 

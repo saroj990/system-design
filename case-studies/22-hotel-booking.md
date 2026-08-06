@@ -32,26 +32,147 @@ Travelers need to find lodging for specific check-in/check-out dates. Hosts mana
 - Handle peak booking spikes (holidays)  
 - Idempotent booking API (retries safe)  
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day**. Traffic rarely stays flat; **peak is often 2–5× average** (holiday weekends, summer travel, city-wide events).
 
-- 2M active listings  
-- 500K bookings/day  
-- Average stay 3 nights  
-- Search QPS ≈ 10× booking attempts  
+### Why we estimate
+
+Hotel booking is **read-heavy for discovery** but **write-critical for reservations**. One double-booked night destroys trust. Estimates tell us:
+
+- Whether search or booking confirmation is the bottleneck  
+- How much calendar/availability data we store per listing  
+- When we need **strong consistency** (per listing) vs cache (search results)
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Active listings | 2M | Search index size + calendar rows |
+| Confirmed bookings per day | 500K | Core write path |
+| Average stay length | 3 nights | Booking row size and revenue |
+| Search attempts per booking | ~10 | Users browse before committing |
+| Listing metadata size | ~5 KB | Photos live in object storage |
+| Booking row size | ~500 B | History table growth |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Confirmed bookings (successful writes):**
 
 ```text
-Booking write QPS ≈ 500K / 86400 ≈ 6/s avg, peak ~60/s
-Search QPS ≈ 60/s avg, peak ~600/s
+Bookings per day    = 500,000
+Average booking QPS = 500,000 ÷ 86,400
+                    ≈ 5.8 writes/second
 
-Listing metadata ≈ 2M × ~5 KB ≈ 10 GB
-Bookings/year ≈ 500K × 365 ≈ 182M rows × ~500 B ≈ 90 GB/year
-
-Calendar slots: 2M listings × 365 days × ~20 B ≈ 15 GB/year (compressed bitmaps help)
+Peak booking QPS (5× holiday) ≈ 5.8 × 5
+                              ≈ 29 writes/second
 ```
 
-Insight: **availability + booking must be strongly consistent per listing** — use DB constraints or distributed locks around the reservation window.
+Only ~30 confirmed bookings/sec at peak — the DB can handle this **if** each write is fast and contention is scoped per listing.
+
+**Booking attempts (includes failures, retries, abandoned carts):**
+
+```text
+Attempt multiplier  ≈ 3× (users retry dates, payment fails, etc.)
+Attempt QPS (avg)   ≈ 5.8 × 3 ≈ 17/s
+Peak attempts       ≈ 17 × 5 ≈ 85/s
+```
+
+**Search queries (discovery path):**
+
+```text
+Search per day      = 500K bookings × 10 searches each
+                    = 5M searches/day
+
+Search QPS (avg)    = 5M ÷ 86,400 ≈ 58 reads/second
+Peak search (5×)    ≈ 290 reads/second
+```
+
+**Availability checks (date picker — hot path during search):**
+
+```text
+Assume 5 availability API calls per search
+Availability QPS (avg) = 58 × 5 ≈ 290/s
+Peak                 ≈ 1,450/s
+```
+
+### Step B — Storage
+
+**Listing metadata:**
+
+```text
+Listings          = 2M
+Bytes per listing ≈ 5 KB (title, geo, price, host_id — not photos)
+
+Listing data      = 2M × 5 KB ≈ 10 GB
+Photos (S3)       = 2M × 10 photos × 300 KB ≈ 6 TB (object storage, CDN)
+```
+
+**Bookings (historical):**
+
+```text
+Bookings per year = 500K × 365 ≈ 182M rows
+Row size          ≈ 500 B
+
+Year-1 bookings   = 182M × 500 B ≈ 91 GB/year
+5-year retention  ≈ 450 GB — manageable; archive cold rows
+```
+
+**Availability calendar (per listing, per night):**
+
+```text
+Slot rows         = 2M listings × 365 nights ≈ 730M slot-rows/year
+Bytes per slot    ≈ 20 B (date, status bitmap or enum)
+
+Calendar data     ≈ 730M × 20 B ≈ 15 GB/year
+Compressed bitmaps per listing can shrink this further
+```
+
+### Step C — Bandwidth and other resources
+
+**Search API responses:**
+
+```text
+Results per search  ≈ 20 listings × 500 B summary ≈ 10 KB JSON
+Peak search QPS     ≈ 290/s
+
+Search egress       = 290 × 10 KB ≈ 2.9 MB/s — modest; Elasticsearch cluster is the cost center
+```
+
+**Listing detail page:**
+
+```text
+Assume 2M detail views/day × 50 KB (with cached photos metadata)
+≈ 1.2 GB/day API JSON — negligible
+```
+
+**Contention, not bandwidth, is the story:** two guests booking the **same listing + overlapping dates** at the same second — that’s a **few writes/sec per hot listing**, not global QPS.
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Avg QPS | Peak QPS | Notes |
+|-----------|------|---------|----------|-------|
+| Search listings | Read | ~58 | ~290 | Elasticsearch + geo filter |
+| Check availability | Read | ~290 | ~1,450 | Must reflect recent blocks |
+| View listing detail | Read | ~23 | ~115 | Cacheable |
+| Create booking | Write | ~6 | ~29 | **Must be atomic per listing** |
+| Block/unblock dates (host) | Write | ~1 | ~10 | Low volume |
+| Cancel booking | Write | ~1 | ~5 | Updates calendar + refund |
+
+**Ratio:** reads ~50× writes on average — but **correctness on writes** matters more than read scale.
+
+### What the numbers tell us
+
+- **~29 confirmed bookings/s peak is small globally** — but **one popular listing** can see many concurrent attempts; scope locks by `listing_id`  
+- **Availability reads (~1,450/s peak)** should be cached briefly, but **never cache stale availability** across the booking transaction  
+- **10 GB of listing metadata** fits one DB; photos belong in S3 + CDN  
+- **91 GB/year of bookings** is fine in Postgres; index by `listing_id` and `guest_id`  
+- **Search (~290/s peak)** needs Elasticsearch with geo + date filters, not SQL `LIKE`  
+- Use **DB constraints or SELECT FOR UPDATE** on the date range — eventual consistency causes double-booking
+
+### Common mistake for this problem
+
+Optimizing **search QPS** while ignoring **per-listing write contention**. Two users booking the last night must serialize — use a transaction, unique constraint on `(listing_id, check_in, check_out)`, or short-lived Redis hold. Another mistake: **caching availability** without invalidating at booking time. Finally, assuming **500K bookings/day** means 500K writes/sec — it’s only ~6/s average.
 
 ## 4. High-Level Design (HLD)
 

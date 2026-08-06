@@ -21,9 +21,87 @@ Allow at most `N` requests per client per time window (e.g., 100 req/min/IP or p
 - Correct enough under concurrency  
 - Highly available (if limiter fails, define fail-open vs fail-closed)  
 
-## 3. Estimates
+## 3. Back-of-the-envelope estimates
 
-Edge API at 100k RPS peak → limiter must be O(1) memory ops, usually Redis.
+We do rough math so we know **what to optimize**. Exact precision is not the goal — **order of magnitude** is.
+
+### Why we estimate (beginner tip)
+
+Ask three questions:
+1. **How busy?** → QPS (requests per second)
+2. **How much data?** → storage (GB/TB)
+3. **How fat is the pipe?** → bandwidth (MB/s) when media matters
+
+Cheat sheet: **1 QPS ≈ 86,400 requests/day**. Peak is often **2–5×** average.
+
+### Assumptions (say these out loud)
+
+- Edge API handles **100k requests/sec at peak** (all endpoints combined)
+- Rate limit checked on **every request** before it hits app logic
+- Typical rule: **100 requests/min per user** (or per IP / API key)
+- **10M active keys** (users/IPs) with limits enforced concurrently
+- Limiter must add **< 1 ms** overhead — it sits on the critical path
+
+### Step A — Traffic (QPS)
+
+```text
+Limiter check QPS = API QPS (one check per request):
+  Average API load (assume 20% of peak)  ≈ 20,000/s
+  Peak                                    ≈ 100,000/s
+
+Each check = 1–2 Redis ops (INCR or token-bucket Lua script)
+  100k Redis ops/s → well within a Redis cluster's capacity (100k+ ops/s per node)
+
+Per-key update rate (100 req/min limit):
+  Max 100 checks/min/key ≈ 1.7 ops/s/key — tiny
+```
+
+### Step B — Storage
+
+```text
+Memory per key (token bucket or sliding window counter):
+  ~50–100 bytes (tokens, last refill timestamp, TTL metadata)
+
+10M active keys × 100 bytes ≈ 1 GB RAM
+
+With 50M keys (generous): ≈ 5 GB — fits comfortably in Redis cluster
+
+Keys expire via TTL — no long-term disk storage needed
+```
+
+### Step C — Bandwidth / other (if relevant)
+
+Each limiter check sends/receives **~100 bytes** over the network (if Redis is remote):
+
+```text
+100k checks/s × 100 bytes ≈ 10 MB/s Redis traffic — negligible
+
+If limiter is embedded as middleware with local Redis sidecar, latency drops further
+```
+
+Not applicable for media bandwidth — this is a **latency + memory** problem.
+
+### Step D — Read:write ratio
+
+| Path | Approx share | Implication |
+|------|--------------|-------------|
+| **Limiter check (read + write)** | 100% of API traffic | Must be O(1); no DB round trips |
+| **Rule config updates** | Rare admin writes | Can use DB; not on hot path |
+| **429 responses** | Small fraction when limited | Cheap to generate |
+
+Every API request is both a **read** (get current count/tokens) and a **write** (increment/decrement) — design for atomic ops.
+
+### What the numbers tell us
+
+- **100k peak checks/s** → in-process middleware + **Redis cluster**, not a separate network hop per request if avoidable
+- **O(1) per check** — token bucket or fixed window counter; avoid sliding window log (stores every timestamp)
+- **~1–5 GB RAM** for counters → Redis is the right tool; Postgres is too slow for this hot path
+- **Lua scripts in Redis** for atomic read-modify-write — prevents race conditions across API nodes
+- **Fail-open vs fail-closed** must be decided upfront — payments fail-closed; public reads may fail-open
+
+### Common mistake for this problem
+
+Using **per-server in-memory counters** without a shared store. With 10 API nodes, each allows 100 req/min → a client rotating across nodes gets **10× the limit**. Centralize counters in Redis for distributed correctness.
 
 ## 4. HLD
 

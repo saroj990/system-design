@@ -31,31 +31,97 @@ Unlike a news feed (mostly read-heavy), chat is **write-heavy, latency-sensitive
 - **Durable storage** — messages must not be lost after server ack
 - **High availability** — brief disconnects should auto-reconnect
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+We do rough math so we know **what to optimize**. Exact precision is not the goal — **order of magnitude** is.
 
-- 50M DAU, average **200 messages/user/day** → **10B messages/day**
-- Average message **200 bytes** text metadata; 20% include media metadata pointer
-- Average **50 active conversations** per user; group chats **10%** of traffic
+### Why we estimate (beginner tip)
+
+Ask three questions:
+1. **How busy?** → QPS (requests per second)
+2. **How much data?** → storage (GB/TB)
+3. **How fat is the pipe?** → bandwidth (MB/s) when media matters
+
+Cheat sheet: **1 QPS ≈ 86,400 requests/day**. Peak is often **2–5×** average.
+
+### Assumptions (say these out loud)
+
+- **50M DAU**, average **200 messages/user/day** → **10B messages/day**
+- Average text message **200 bytes**; with metadata ≈ **250 bytes** stored per message
+- **20% of messages** include a media pointer (actual bytes in S3, not in message row)
+- **10% of traffic** is group chats (1 write → N recipient pushes)
+- Reads ≈ **2× writes** (history fetch + sync on reconnect)
+- **30% of DAU online concurrently** → long-lived WebSocket connections
+
+### Step A — Traffic (QPS)
 
 ```text
-Write QPS ≈ 10B / 86,400 ≈ 115,000/s avg, peak ~500,000/s
-Read QPS  ≈ 2× writes (history fetch + sync) ≈ 230,000/s avg
+Message write QPS:
+  10B / day ÷ 86,400 ≈ 115,000/s average
+  Peak (5× avg)         ≈ 500,000/s
 
-Storage/year (text only):
-  10B/day × 365 × 250B ≈ 900 TB/year
-  → need sharding + tiered storage; media in object storage
+Read QPS (history + sync):
+  2× writes ≈ 230,000/s average, ~1M/s peak
 
 Concurrent WebSocket connections:
-  50M DAU × 30% online concurrently ≈ 15M connections
-  → need many connection servers, ~50k–100k connections each
+  50M DAU × 30% online ≈ 15M simultaneous connections
 
-WebSocket memory rough:
-  15M × ~10 KB/session ≈ 150 GB connection state (excluding buffers)
+Connection servers needed:
+  15M / 100k connections per server ≈ 150 chat server instances
 ```
 
-**Insight:** Separate **connection layer** (WebSockets) from **message persistence** (DB). Use **message queue** for cross-server fan-out when recipient is on a different chat server.
+### Step B — Storage
+
+```text
+Text messages per year:
+  10B/day × 365 × 250 bytes ≈ 900 TB/year
+
+Media (separate, in S3):
+  Assume 2B media messages/day × 500 KB avg ≈ 1 PB/day — dominates; tier + CDN
+
+Message retention (1 year text):
+  ~900 TB → shard Messages DB by hash(conversation_id)
+
+Inbox metadata (user_inbox rows):
+  50M users × 50 conversations × 100 bytes ≈ 250 GB — fits in sharded SQL
+```
+
+### Step C — Bandwidth / other (if relevant)
+
+WebSocket push traffic (500k peak message writes, ~1 KB frame each):
+
+```text
+500k/s × 1 KB ≈ 500 MB/s push bandwidth across chat servers
+
+Connection state memory:
+  15M sessions × ~10 KB/session ≈ 150 GB RAM (routing + buffers, excluding media)
+```
+
+Media uploads/downloads go through **S3 + CDN** — not through chat servers.
+
+### Step D — Read:write ratio
+
+| Path | Approx share | Implication |
+|------|--------------|-------------|
+| **Send message (write + push)** | ~33% | Persist first, then Kafka fan-out to recipient's chat server |
+| **History fetch / offline sync (read)** | ~67% | Paginate by `conversation_id + seq`; shard by conversation |
+| **Presence / heartbeat** | Overhead | Redis TTL keys; lightweight, high frequency |
+
+Unlike feeds, chat is closer to **1:1 write:read** — both paths are hot.
+
+### What the numbers tell us
+
+- **500k peak message writes/s** → cannot use a single Postgres; shard by `conversation_id`, consider Cassandra/Scylla
+- **15M WebSocket connections** → dedicated **connection layer** separate from message persistence
+- **Redis route table** (`user_id → chat_server_id`) for cross-server delivery via Kafka
+- **Persist before push** — DB is source of truth; WebSocket push is an optimization
+- **Client-generated `clientMsgId`** + unique constraint for idempotent retries
+- **Per-conversation sequence** (Redis INCR) for ordering within a chat
+- **900 TB/year text** → tiered storage; archive old conversations to cold storage
+
+### Common mistake for this problem
+
+Using **HTTP polling** for real-time chat at 50M DAU. Polling every 2 seconds = 25M req/s wasted — use **WebSockets** with a separate connection tier and message queue for cross-server fan-out.
 
 ## 4. High-Level Design (HLD)
 

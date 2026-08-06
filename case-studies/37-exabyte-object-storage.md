@@ -44,33 +44,144 @@ The hard part is not storing one object — it is **metadata at trillion-object 
 
 ## 3. Back-of-the-envelope
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not an S3 capacity contract. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day** (86,400 seconds in a day). Exabyte object storage is **read-heavy at massive scale** — the surprise is that **metadata**, not disk bytes, is usually the scaling bottleneck.
 
-- 100B objects, average size **10 MB** → **1 EB** raw (matches headline scale)  
-- PUT rate **500k/s** global avg, peak **2M/s**  
-- GET rate **10M/s** avg (read-heavy CDN origin, analytics, ML)  
-- Metadata per object: **1 KB** (key, version, checksum, location, timestamps)  
+### Why we estimate
+
+At exabyte scale, you cannot treat object storage like a big filesystem. Estimates tell us:
+
+- Why **3× replication for all data** is cost-prohibitive → erasure coding  
+- Whether **metadata indexing** or **PUT throughput** breaks first  
+- How many **disks** and **storage nodes** the fleet actually requires  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Total objects | 100B | Metadata index must shard at trillion scale |
+| Average object size | 10 MB | Blended (many small, some large multipart) |
+| Logical data | 1 EB | Headline scale target |
+| PUT rate (global avg) | 500K/s | Ingest from apps, logs, ML pipelines |
+| GET rate (global avg) | 10M/s | Read-heavy — CDN origin, analytics, ML training |
+| Metadata per object | 1 KB | Key, version, checksum, shard locations |
+| Erasure coding | 10+4 (1.4× overhead) | vs 3× replication = 3.0× overhead |
+| Drive size | 12 TB | Commodity HDD class |
+
+### Step A — Traffic (QPS / throughput) with labeled arithmetic
+
+**PUT rate:**
 
 ```text
-Metadata storage ≈ 100B × 1 KB ≈ 100 PB (must shard aggressively)
-
-If 3-replica replication for 1 EB data:
-  ≈ 3 EB disk (too expensive at exabyte scale)
-
-Erasure coding (10+4 EC, 1.4× overhead):
-  ≈ 1.4 EB disk + parity reconstruction CPU on failure
-
-PUT QPS 500k/s × 10 MB ≈ 5 TB/s ingest (peak ~20 TB/s)
-  → need wide striping, many independent partition writers
-
-Disk count (12 TB drives, 1.4× EC):
-  1.4 EB / 12 TB ≈ 117,000 drives minimum (+ system overhead → ~150k drives)
-
-ListObjects prefix query:
-  hot prefix may contain 1M keys → pagination + indexed prefix metadata, not full scan
+Avg PUT QPS       = 500,000 objects/second
+Peak PUT QPS      ≈ 2,000,000 objects/second (×4 burst)
 ```
 
-**Insight:** At exabyte scale, **replication for all data is cost-prohibitive**. Standard class uses **erasure coding** with replication only for metadata and hot tail. Metadata is the **scaling bottleneck**, not disk bytes.
+**GET rate (read-heavy — 20:1 over PUT):**
+
+```text
+Avg GET QPS       = 10,000,000 objects/second
+  CDN absorbs much client traffic; origin still sees millions/s
+```
+
+**PUT ingest bandwidth:**
+
+```text
+Avg: 500K PUT/s × 10 MB ≈ 5 TB/s global ingest
+Peak: 2M PUT/s × 10 MB ≈ 20 TB/s
+  → Wide striping across many independent partition writers
+```
+
+**GET egress bandwidth:**
+
+```text
+10M GET/s × 10 MB ≈ 100 TB/s theoretical max
+  → Most served from CDN/edge cache; origin GET is lower but still enormous
+```
+
+### Step B — Storage
+
+**Logical data (user-visible):**
+
+```text
+100B objects × 10 MB ≈ 1 EB raw logical data
+```
+
+**With 3× replication (too expensive at this scale):**
+
+```text
+1 EB × 3 ≈ 3 EB disk — cost-prohibitive for all data
+```
+
+**With erasure coding (10+4, 1.4× overhead):**
+
+```text
+1 EB × 1.4 ≈ 1.4 EB on disk + parity reconstruction CPU on failure
+  Standard class: EC for data; replication for metadata and hot tail
+```
+
+**Metadata storage (the hidden giant):**
+
+```text
+100B objects × 1 KB metadata ≈ 100 PB of metadata
+  → Must shard aggressively — metadata is the scaling bottleneck, not disk bytes
+```
+
+**Disk count:**
+
+```text
+1.4 EB ÷ 12 TB per drive ≈ 117,000 drives minimum
+With system overhead (spares, filesystem, rebalance headroom) → ~150,000 drives
+Across 10K+ storage nodes → ~15 drives per node average (many more in practice)
+```
+
+### Step C — Bandwidth / other
+
+**ListObjects hot prefix problem:**
+
+```text
+A single prefix with 1M keys → pagination mandatory
+  Cannot full-scan; need indexed prefix metadata or separate listing service
+```
+
+**Durability math (11 nines):**
+
+```text
+99.999999999% → ~1 object lost per 10B objects per year
+  Requires continuous scrubbing + repair + EC reconstruction on disk failure
+  At 150K drives, dozens of drives fail daily — background fleet must keep up
+```
+
+**Multipart upload (large objects > 5 GB):**
+
+```text
+A 100 GB object → 10K parts × 10 MB
+  Metadata tracks part list; commit on CompleteMultipartUpload
+```
+
+### Step D — Ratios and capacity table
+
+| Metric | Average | Peak | Notes |
+|--------|---------|------|-------|
+| PUT QPS | 500K/s | 2M/s | Ingest path |
+| GET QPS | 10M/s | — | 20:1 read:write |
+| PUT bandwidth | ~5 TB/s | ~20 TB/s | Wide striping required |
+| Logical data | 1 EB | — | 100B × 10 MB |
+| EC disk (1.4×) | 1.4 EB | — | vs 3 EB with 3× replication |
+| Metadata | ~100 PB | — | 100B × 1 KB — the bottleneck |
+| Drive count | ~150K | — | 12 TB drives + overhead |
+
+### What the numbers tell us
+
+- **100 PB metadata >> 1 EB data** in management complexity → shard metadata service aggressively  
+- **3× replication for 1 EB = 3 EB disk** → cost-prohibitive; **erasure coding (1.4×)** for Standard class  
+- **500K PUT/s, 10M GET/s** → GET dominates; CDN + edge cache in front of origin  
+- **~150K drives, dozens fail daily** → background repair fleet is as important as the front tier  
+- **ListObjects on hot prefix** → indexed prefix metadata, not brute-force scan  
+- **11 nines durability** → continuous scrub + EC reconstruction; not "set and forget" replication  
+
+### Common mistake for this problem
+
+Using **3× replication for all exabyte data** — at 1 EB logical, that's 3 EB of disk and ruinous cost. Interviewers want **erasure coding (10+4)** for Standard class with replication reserved for metadata and small hot objects. Another mistake: assuming **disk bytes are the bottleneck** — at 100B objects, the **metadata index (100 PB)** and **request routing to the right partition** dominate design.
 
 ## 4. High-Level Design (HLD)
 

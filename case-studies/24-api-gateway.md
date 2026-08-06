@@ -32,28 +32,145 @@ Mobile and web clients should not call dozens of internal services directly. A g
 - Rate limits accurate enough for abuse prevention (not perfect global sync required for MVP)  
 - High availability — gateway is on every request path  
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day**. The gateway sits on **every request path** — **peak is often 2–5× average**, and a bad gateway takes down all services.
 
-- 10 backend services  
-- 50K RPS aggregate through gateway  
-- Average gateway processing 5 ms; backend 100 ms  
+### Why we estimate
+
+An API gateway is **pure infrastructure** — it adds latency to every call but offloads cross-cutting work (auth, rate limits, routing) from backends. Estimates tell us:
+
+- How many **stateless gateway instances** we need  
+- Whether **Redis** can hold rate-limit counters at our key cardinality  
+- How much **log volume** we generate (often the hidden cost)
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Aggregate traffic through gateway | 50K RPS | All client traffic enters here |
+| Backend services | 10 | Routing table complexity |
+| Gateway processing overhead | ~5 ms P95 | Must stay thin |
+| Average backend latency | ~100 ms | Gateway is small fraction of total |
+| Active API keys / users for rate limiting | 1M | Redis memory for counters |
+| Log sampling rate | 1% of requests | Cost control |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Total gateway throughput:**
 
 ```text
-Gateway instances:
-  each handles ~5K RPS comfortably
-  50K / 5K = ~10 instances (+ N+1 for HA)
+Aggregate RPS       = 50,000 requests/second (given peak design point)
 
-Rate limit storage:
-  1M active API keys × ~100 B ≈ 100 MB in Redis
-
-Log volume:
-  50K RPS × 86400 ≈ 4.3B requests/day
-  sample 1% + structured logs ≈ manageable with log pipeline
+Daily requests      = 50,000 × 86,400
+                    ≈ 4.3 billion requests/day
 ```
 
-Insight: **gateway stays thin** — heavy business logic stays in services; gateway does cross-cutting concerns only.
+This is already a **peak-ish** number in many designs; average might be 15–20K RPS with 50K at peak.
+
+**Per-backend share (uniform rough split):**
+
+```text
+RPS per backend     = 50,000 ÷ 10 services
+                    ≈ 5,000 RPS each (varies — one hot service may get 20K)
+```
+
+**Auth validation (JWT verify — every request):**
+
+```text
+JWT validations/s   = 50,000/s (same as ingress — no skip on authenticated routes)
+CPU cost            ≈ 0.1–0.5 ms per verify — must use local JWKS cache
+```
+
+**Rate-limit checks:**
+
+```text
+Counter lookups/s   = 50,000 Redis GET/INCR operations/second
+→ Redis cluster or local token bucket with async sync for MVP
+```
+
+### Step B — Storage
+
+**Rate-limit state (Redis):**
+
+```text
+Active API keys     = 1M
+Bytes per key state ≈ 100 B (token count, window expiry, metadata)
+
+Redis memory        = 1M × 100 B ≈ 100 MB — trivial; even 10M keys ≈ 1 GB
+```
+
+**Routing config:**
+
+```text
+Routes              = ~200 path → backend mappings
+Config size         ≈ 50 KB — loaded at startup, hot-reloaded from etcd/Consul
+```
+
+**Access logs (if stored 30 days):**
+
+```text
+Requests/day        ≈ 4.3B (at 50K RPS sustained — upper bound)
+Log row size        ≈ 500 B (timestamp, path, status, latency, trace_id)
+
+Full logs/day       = 4.3B × 500 B ≈ 2 TB/day — too expensive
+Sampled 1%          ≈ 20 GB/day → ~600 GB/month to log pipeline (Elasticsearch/S3)
+```
+
+### Step C — Bandwidth and other resources
+
+**Gateway instance capacity:**
+
+```text
+Each gateway node    ≈ 5,000–10,000 RPS (depends on TLS, JWT, aggregation)
+Required instances   = 50,000 ÷ 5,000 = 10 instances
+Add N+1 for HA       → 11–12 instances minimum
+```
+
+**Latency budget:**
+
+```text
+Client total budget  ≈ 200 ms (typical mobile API)
+Gateway overhead     ≈ 5 ms (routing + auth + rate limit)
+Backend              ≈ 100 ms
+Network + client     ≈ 95 ms remaining
+```
+
+Gateway must stay **under 10–20 ms P95** — no heavy aggregation in hot path unless cached.
+
+**Aggregation endpoints (optional):**
+
+```text
+One aggregated call  = 3 backend hops × 100 ms = 300 ms sequential (bad)
+Parallel fan-out     = max(100 ms) + 5 ms gateway ≈ 105 ms (good)
+Peak aggregated RPS  ≈ 5,000/s → 15,000 internal backend calls/s
+```
+
+### Step D — Read:write ratio table
+
+| Operation | Type | QPS @ 50K ingress | Notes |
+|-----------|------|-------------------|-------|
+| Route + proxy request | Read (pass-through) | ~45,000 | Simple path → backend |
+| JWT validation | Read (crypto) | ~50,000 | Cache JWKS keys |
+| Rate-limit counter | Read/write | ~50,000 | Redis INCR |
+| Aggregation (multi-backend) | Read | ~5,000 | Fan-out parallel |
+| Config / route reload | Read | ~1/min | Not per-request |
+| Access log emit | Write (async) | ~50,000 events | Sample 1% to storage |
+
+**Ratio:** gateway is **~100% read/proxy** — it should almost never write business data.
+
+### What the numbers tell us
+
+- **~10–12 stateless gateway instances** at 50K RPS — scale horizontally behind a load balancer  
+- **Keep gateway thin** — auth, route, rate limit, log; business logic stays in services  
+- **Redis ~100 MB** for 1M rate-limit keys — use sliding window or token bucket per `(user_id, route)`  
+- **Full logging at 50K RPS = ~2 TB/day** — sample, structured logs, ship to async pipeline  
+- **JWT verify at 50K/s** — cache public keys; avoid introspection call per request  
+- **Aggregation** multiplies backend load — cache merged responses where possible (e.g., home feed)
+
+### Common mistake for this problem
+
+Putting **business logic in the gateway** (discount calculation, DB queries) — adds latency and couples deployment. Another mistake: **synchronous global rate limit** with perfect accuracy — local counters + Redis sync is enough for MVP. Finally, sizing gateway for **average RPS** when **50K is already peak** — always leave headroom for 2× spikes.
 
 ## 4. High-Level Design (HLD)
 

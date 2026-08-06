@@ -37,27 +37,143 @@ Naive approach — compare every friend pair — does not scale.
 - Battery-friendly — batch updates, adaptive frequency  
 - Scale to 100M users with ~10% sharing at once  
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day**. Location systems are **write-heavy** — peak is often **2–3× average** when many users commute or attend events.
 
-- 100M DAU, 10% share location = 10M active sharers  
-- Update every 5 minutes  
-- Average 200 friends per user (but queries only check mutual sharers)  
+### Why we estimate
+
+Nearby Friends is inverted from most apps: **many location writes**, relatively **few map reads**. Naive O(friends²) pairwise distance checks fail at scale. Estimates tell us:
+
+- Why writes (~33K/s) dominate reads (~350/s)  
+- That **current location storage is tiny** (~640 MB) but **update rate is high**  
+- Why **geohash indexing** beats brute-force friend comparison
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Daily active users (DAU) | 100M | Total user base |
+| Users sharing location | 10% = 10M | Active writers + index size |
+| Update interval | Every 5 minutes | Write frequency |
+| Average friends per user | 200 | Read path filters by friend list |
+| Nearby query radius | 5 km | Geohash cell neighbors |
+| Map opens per sharer per day | 3 | Read QPS |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Location updates (writes):**
 
 ```text
-Location write QPS ≈ 10M / 300s ≈ 33,000/s avg, peak ~100,000/s
+Active sharers      = 100M × 10% = 10M users
+Update interval     = 5 minutes = 300 seconds
 
-Storage (current location per user):
-  10M × (~16B geohash + lat/lng + timestamp + userId) ≈ 10M × 64B ≈ 640 MB
+Write QPS (avg)     = 10M ÷ 300
+                    ≈ 33,300 location updates/second
 
-Nearby read QPS: if 10M users open map 3×/day ≈ 350/s (low vs writes)
-  Peak map opens: ~5,000/s
-
-Friend graph lookups dominate read path — not full table scan
+Peak write QPS (3×) ≈ 33,300 × 3
+                    ≈ 100,000 updates/second
 ```
 
-Insight: **index locations by geohash** and only search neighboring cells; filter by friend list after candidate retrieval.
+Each update: `(user_id, lat, lng, timestamp, geohash)` → Redis/GEORADIUS index.
+
+**Nearby friends queries (reads):**
+
+```text
+Map opens per day   = 10M sharers × 3 opens/day
+                    = 30M reads/day
+
+Read QPS (avg)      = 30M ÷ 86,400
+                    ≈ 350 reads/second
+
+Peak read QPS (3×)  ≈ 1,000 reads/second
+```
+
+**Write:read ratio:**
+
+```text
+Updates vs map reads ≈ 33,300 : 350 ≈ 95:1 write-heavy
+```
+
+### Step B — Storage
+
+**Current location (hot — Redis GEO or geohash hash):**
+
+```text
+Active sharers      = 10M
+Bytes per record    ≈ 64 B (user_id 8B + lat/lng 16B + geohash 8B + timestamp 8B + metadata)
+
+Total hot storage   = 10M × 64 B ≈ 640 MB — fits Redis easily
+```
+
+**Location history (if stored — usually NOT for MVP):**
+
+```text
+If storing every ping 30 days:
+  10M users × (30 days × 288 updates/day) ≈ 86B rows — too much
+MVP: **current location only**; optional last-known for staleness badge
+```
+
+**Friend graph (for filtering candidates):**
+
+```text
+100M users × 200 friends avg × 8 B edge ≈ 160 GB — social graph service, not location store
+Store adjacency list or pull friend IDs then batch-check distances
+```
+
+### Step C — Bandwidth and other resources
+
+**Location update payload:**
+
+```text
+Update size         ≈ 100 B JSON (lat, lng, accuracy, timestamp)
+Peak write QPS      ≈ 100,000/s
+
+Ingress bandwidth   = 100,000 × 100 B ≈ 10 MB/s — modest
+```
+
+**Nearby query response:**
+
+```text
+Assume 5 nearby friends returned × 200 B each ≈ 1 KB
+Peak read QPS       ≈ 1,000/s
+
+Egress              ≈ 1 MB/s — reads are cheap; geohash lookup CPU matters more
+```
+
+**Geohash query pattern:**
+
+```text
+Precision-6 geohash cell ≈ 1.2 km × 0.6 km
+5 km radius → search 9–25 neighboring cells
+Candidates per query   ≈ 50–500 users in dense cities
+Filter to friend list  ≈ 200 friend IDs → O(candidates) intersection, not O(all users)
+```
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Avg QPS | Peak QPS | Notes |
+|-----------|------|---------|----------|-------|
+| Push location update | Write | ~33,300 | ~100,000 | Every 5 min per sharer |
+| Query nearby friends | Read | ~350 | ~1,000 | Geohash + friend filter |
+| Enable/disable sharing | Write | ~10 | ~50 | Rare toggle |
+| Fetch friend list | Read | ~350 | ~1,000 | Cache per user |
+| Expire stale locations (worker) | Write | ~100 | ~300 | TTL on inactive sharers |
+
+**Ratio:** **~95:1 writes to reads** — optimize write path (batch, adaptive frequency); reads are geohash-bounded.
+
+### What the numbers tell us
+
+- **~100K location writes/s peak** — Redis GEO or geohash buckets; don’t write every ping to Postgres  
+- **Only ~640 MB** for 10M current locations — memory is not the bottleneck; **update rate** is  
+- **Reads (~1K/s peak) are low** — but each query must finish in < 300 ms via geohash neighbors, not full scan  
+- **Friend filter after geo candidate retrieval** — never compare all 200 friends with haversine if they’re globally distributed  
+- **Adaptive update interval** — stationary users ping every 15 min; moving users every 1–2 min (saves writes)  
+- **Privacy fuzzing** — round coords to ~100 m; store coarse geohash for display
+
+### Common mistake for this problem
+
+**O(n²) all-pairs** friend distance checks or scanning **all 10M sharers** per query. Another mistake: storing **full location history forever** in SQL — 86B rows/year. Finally, ignoring **battery** — second-by-second GPS would 10× write QPS; batch and adapt frequency.
 
 ## 4. High-Level Design (HLD)
 

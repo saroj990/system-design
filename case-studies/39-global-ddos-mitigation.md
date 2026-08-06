@@ -44,33 +44,129 @@ You must **detect and mitigate** within seconds, **scrub** bad traffic close to 
 
 ## 3. Back-of-the-envelope
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a Cloudflare contract. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day** (86,400 seconds in a day). DDoS mitigation is measured in **Tbps and millions of rps** — the surprise is that **stateless edge scrubbing** and **rate-limit key cardinality** dominate design, not origin server count.
 
-- Normal API traffic **2 Tbps** global aggregate egress+ingress at peak  
-- Largest historical attack **4 Tbps** volumetric + **50M rps** L7 at peak  
-- Average HTTP request **5 KB**; attack mix 80% volumetric, 20% L7  
+### Why we estimate
+
+Planet-scale DDoS protection must absorb **multi-Tbps floods** while adding **< 5 ms** for clean traffic. Estimates tell us:
+
+- Whether **scrubbing capacity** or **rate-limit state** is the real bottleneck  
+- Why **Anycast** (mitigate close to attacker) beats centralized scrubbing  
+- How **challenge flows** create their own capacity problem at scale  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Normal peak traffic | 2 Tbps | Legitimate API aggregate globally |
+| Largest attack seen | 4 Tbps volumetric | Must survive above normal peak |
+| L7 attack peak | 50M rps | HTTP GET/POST storms |
+| Avg HTTP request | 5 KB | API JSON payloads |
+| Attack mix | 80% volumetric, 20% L7 | Different mitigation paths |
+| PoPs | 50+ | Anycast absorption points |
+| Default rate limit | 100 req/s per IP | Auth endpoints |
+| Challenge rate | 1% of requests | JS/captcha under suspicion |
+
+### Step A — Traffic (QPS / throughput) with labeled arithmetic
+
+**Normal L7 request rate (upper bound from bandwidth):**
 
 ```text
-Normal L7 QPS ≈ 2 Tbps / (5 KB × 8) ≈ 50M req/s (rough upper bound across all PoPs)
-
-Edge rate limit default: 100 req/s per IP on auth endpoints
-  Unique IPs during attack may spike to 500M (botnet) → need probabilistic structures
-
-Scrubbing center sizing per PoP:
-  Target 200 Gbps clean capacity × 30 PoPs ≈ 6 Tbps scrubbing headroom
-
-SYN flood 100M pps globally:
-  SYN cookie + kernel bypass (XDP/DPDK) on edge routers
-  State table avoided for half-open until cookie valid
-
-Rate limit counter memory:
-  1B active keys × 16 B ≈ 16 GB per PoP (shard across edge nodes with Redis/CRDT)
-
-Challenge flow:
-  1% of requests challenged × 50M rps = 500k rps crypto puzzles — dedicated challenge tier
+2 Tbps ÷ (5 KB × 8 bits/byte)
+  = 2 × 10¹² ÷ 40,000
+  ≈ 50 million requests/second (rough upper bound across all PoPs)
 ```
 
-**Insight:** **Mitigate as close to the attacker as possible** (Anycast absorbs locally). Origin never sees raw Internet — only **scrubbed, rate-limited** connections from the edge mesh.
+**Attack L7 peak:**
+
+```text
+50M rps during L7 flood
+  → WAF + bot scoring + rate limits must filter before origin
+```
+
+**Volumetric attack:**
+
+```text
+4 Tbps volumetric (UDP reflection, SYN flood)
+  Normal capacity 2 Tbps → need 6 Tbps total scrubbing headroom
+  80% of attack volume is L3/L4 → SYN cookies, UDP rate limit, RTBH
+```
+
+**SYN flood packet rate (example):**
+
+```text
+100M packets/second globally during SYN flood
+  → SYN cookies + XDP/DPDK kernel bypass; no state table for half-open
+```
+
+### Step B — Storage
+
+**Rate-limit counter state (per PoP):**
+
+```text
+Active keys per PoP ≈ 1 billion (IPs, user IDs, route combos)
+Bytes per key     ≈ 16 B (token bucket state)
+
+Memory per PoP    = 1B × 16 B ≈ 16 GB
+  → Sharded across edge nodes; Redis/CRDT for distributed counters
+  → During botnet attack: 500M unique IPs may spike → probabilistic structures (Count-Min Sketch)
+```
+
+**Attack log / dashboard storage:**
+
+```text
+Top talkers, ASN stats, rule hits → streaming to central analytics
+  Retention: hours (incident) to days (forensics) — not petabyte scale
+```
+
+### Step C — Bandwidth / other
+
+**Scrubbing center sizing:**
+
+```text
+Target 200 Gbps clean capacity per PoP × 30 active PoPs
+  ≈ 6 Tbps scrubbing headroom (covers 4 Tbps attack + 2 Tbps normal)
+```
+
+**Challenge tier capacity:**
+
+```text
+1% of 50M rps challenged = 500,000 crypto puzzles/second
+  → Dedicated challenge tier (PoW, JS challenge); cannot run on same nodes as clean proxy
+```
+
+**Clean traffic latency budget:**
+
+```text
+Edge add p99 < 5 ms (excluding challenge flows)
+  Anycast routing + WAF signature check + rate limit lookup
+  Challenge flow: +200–2000 ms (user-visible; acceptable for suspicious traffic)
+```
+
+### Step D — Ratios and capacity table
+
+| Metric | Normal | Attack peak | Notes |
+|--------|--------|-------------|-------|
+| Aggregate bandwidth | 2 Tbps | 4+ Tbps | Volumetric + L7 combined |
+| L7 request rate | ~50M rps | ~50M rps | Upper bound from bandwidth |
+| Scrubbing headroom | — | ~6 Tbps | 30 PoPs × 200 Gbps |
+| Rate-limit keys/PoP | ~1B | ~500M IPs | Botnet spikes cardinality |
+| Counter memory/PoP | ~16 GB | — | Sharded token buckets |
+| Challenge rps | — | ~500K/s | 1% of 50M rps |
+| False positive target | — | < 0.01% | Logged-in API traffic |
+
+### What the numbers tell us
+
+- **Mitigate as close to the attacker as possible** — Anycast absorbs locally at 50+ PoPs; origin never sees raw Internet  
+- **6 Tbps scrubbing headroom** for 4 Tbps attack + 2 Tbps normal — always provision above largest historical attack  
+- **50M rps L7** → edge rate limiting + WAF before origin; origin shield accepts only scrubbed traffic  
+- **16 GB rate-limit state per PoP** → sharded counters; Count-Min Sketch when IP cardinality explodes during botnet  
+- **500K challenge rps** → dedicated tier; 1% challenge rate × 50M rps is its own massive workload  
+- **Origin hidden** → only accept connections from scrubbing network; RTBH for surgical blackhole  
+
+### Common mistake for this problem
+
+Trying to **scale the origin** to absorb a 4 Tbps attack — no origin fleet can survive that. Interviewers want **Anycast edge scrubbing** that drops bad traffic before it reaches you, plus **origin shield** so attackers never learn your real IPs. Another mistake: **per-IP rate limits alone** against a 500M-IP botnet — you need behavioral scoring, JA3 fingerprinting, and probabilistic data structures when key cardinality explodes.
 
 ## 4. High-Level Design (HLD)
 

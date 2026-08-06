@@ -45,30 +45,134 @@ You must handle: **partial failure**, **duplicate messages**, **ordering**, **ti
 
 ## 3. Back-of-the-envelope
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a booking platform SLA. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day** (86,400 seconds in a day). Sagas are **low-QPS orchestration** with **high correctness requirements** — the surprise is message volume during failure paths, not happy-path throughput.
 
-- 50K bookings/day peak; 10 steps max per saga (including compensations)  
-- 4 services; average step 200 ms  
-- 5% sagas hit failure path → compensations  
-- Message size ~2 KB  
+### Why we estimate
+
+A saga coordinates **multiple microservices** without 2PC. Estimates tell us:
+
+- Whether the **orchestrator** or **downstream services** is the real bottleneck  
+- How much **durable saga state** and **idempotency storage** actually need  
+- Why **compensation latency** matters more than happy-path booking rate  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Bookings/day (peak season) | 50K | Drives saga creation rate |
+| Steps per saga (happy path) | 4 | Flight → hotel → payment → notify |
+| Max steps (with compensations) | 10 | Failure path runs reverse compensations |
+| Avg step latency | 200 ms | External service call + local DB |
+| Failure rate | 5% of sagas | Trigger compensation chain |
+| Message size | ~2 KB | Commands, replies, state updates |
+| Services involved | 4 | Flight, Hotel, Payment, Notification |
+
+### Step A — Traffic (QPS / throughput) with labeled arithmetic
+
+**Saga creation rate:**
 
 ```text
-Booking rate ≈ 50K / 86,400 ≈ 0.6/s avg, peak ~5/s
+Bookings/day      = 50,000
+Avg booking rate  = 50K ÷ 86,400
+                  ≈ 0.6 sagas/second
 
-Happy path messages ≈ 4 commands + 4 replies ≈ 8 × 5/s = 40 msg/s peak
-Failure path adds ~3 compensate commands ≈ +15 msg/s worst case
-
-Saga state storage:
-  50K/day × 30 days × ~2 KB ≈ 3 GB/month
-
-Outbox + inbox dedup:
-  step idempotency keys × 7 day retention — small Redis/DB table
-
-Compensation SLA:
-  99% complete within 5 min; manual queue for stuck
+Peak (×10 for holiday rush):
+  ≈ 6 sagas/second
 ```
 
-Insight: **orchestrator stores saga state** and drives transitions; each service implements **forward action + compensating action** with **business-level idempotency keys**; use **transactional outbox** for reliable publish.
+**Happy-path message volume:**
+
+```text
+Messages per saga = 4 commands + 4 replies = 8 messages
+Peak happy path   = 8 × 6 sagas/s ≈ 48 messages/second
+```
+
+**Failure-path message volume (5% of sagas):**
+
+```text
+Failed sagas/s    ≈ 6 × 5% ≈ 0.3 sagas/s
+Compensation msgs ≈ 3 compensate commands × 0.3 ≈ 1 msg/s average
+
+Worst-case burst (many simultaneous failures):
+  +15 compensate messages/second additional
+```
+
+**End-to-end latency (happy path):**
+
+```text
+4 steps × 200 ms ≈ 800 ms sequential minimum
+  + orchestrator overhead + network → target p99 < 3 s
+```
+
+### Step B — Storage
+
+**Saga state (durable — must survive orchestrator crash):**
+
+```text
+Sagas/day         = 50,000
+Retention         = 30 days
+Bytes per saga    ≈ 2 KB (state, step history, timestamps)
+
+Monthly storage   = 50K/day × 30 days × 2 KB ≈ 3 GB/month
+  → Tiny — saga state is not a storage problem
+```
+
+**Outbox + inbox dedup (idempotency keys):**
+
+```text
+Step keys × 7-day retention ≈ small Redis/DB table
+  Each service stores processed messageId to reject duplicates
+  → At 6 sagas/s peak, this is thousands of keys, not millions
+```
+
+### Step C — Bandwidth / other
+
+**Orchestrator ↔ service messaging:**
+
+```text
+Peak ~48 msg/s × 2 KB ≈ 96 KB/s
+  Bandwidth is irrelevant — latency and reliability dominate
+```
+
+**Compensation SLA:**
+
+```text
+99% compensations complete within 5 minutes
+  Stuck compensations → manual ops queue + alert
+  Compensation failure is worse than initial failure — user may be double-charged
+```
+
+**Transactional outbox:**
+
+```text
+Each service write + outbox insert in same local DB transaction
+  Separate relay process publishes to message bus
+  → Guarantees at-least-once delivery without 2PC across services
+```
+
+### Step D — Ratios and capacity table
+
+| Metric | Average | Peak | Notes |
+|--------|---------|------|-------|
+| Saga starts/s | ~0.6/s | ~6/s | Low QPS — correctness over throughput |
+| Happy-path msgs/s | ~5/s | ~48/s | 8 messages per saga |
+| Failure-path msgs/s | ~0.3/s | ~15/s | 5% failure + compensation burst |
+| Saga state/month | ~3 GB | — | Durable orchestrator DB |
+| End-to-end p99 | — | < 3 s | 4 × 200 ms sequential steps |
+| Compensation SLA | — | 99% in 5 min | Manual queue for stuck |
+
+### What the numbers tell us
+
+- **~0.6 sagas/s average, ~6/s peak is tiny** → orchestrator is not a throughput bottleneck; **state durability and idempotency** are  
+- **3 GB/month saga state** → store full audit trail; replay from any step on orchestrator crash  
+- **5% failure rate doubles message complexity** → compensations run in **reverse order**; each must be idempotent  
+- **800 ms minimum happy path** → parallelize independent steps where possible; timeout + compensate on slow services  
+- **At-least-once delivery is inevitable** → design every forward action and compensation with **business-level idempotency keys**  
+- **Transactional outbox** → never publish to bus before local DB commit  
+
+### Common mistake for this problem
+
+Proposing **2PC / XA transactions across microservices** — blocking locks, coordinator SPOF, poor availability under partition. Interviewers want the **Saga pattern**: local ACID per service + orchestrator state machine + compensating transactions. Another mistake: ignoring **compensation failures** — "cancel flight" may fail if the flight already departed; you need retry, manual intervention, and alerting, not infinite automatic retry.
 
 ## 4. High-Level Design (HLD)
 

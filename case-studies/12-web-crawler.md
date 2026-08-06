@@ -38,32 +38,134 @@ Given seed URLs, the system should continuously fetch pages, extract new links, 
 
 ## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 operations/day**. Crawlers run 24/7, but **peak parallelism** can be much higher than average when you burst to finish a recrawl window.
 
-- 5 billion unique pages in corpus; re-crawl every ~30 days  
-- Average page: 50 KB HTML  
-- Peak crawl rate: 100,000 pages/second (large fleet)  
+### Why we estimate
+
+A web crawler is a **throughput pipeline**, not a user-facing latency system. Estimates tell us:
+
+- Whether **storage**, **URL metadata**, or **network bandwidth** is the limiting factor  
+- Why a single Redis queue cannot hold billions of URLs  
+- How **politeness** (per-domain rate limits) caps theoretical max fetch rate  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Unique pages in corpus | 5 billion | Total work per crawl cycle |
+| Recrawl interval | ~30 days | Sets sustained average fetch rate |
+| Average HTML page size | 50 KB | Storage and bandwidth |
+| Peak crawl rate (large fleet) | 100,000 pages/s | Burst capacity with many workers |
+| Metadata per URL | ~500 B | URL state DB sizing |
+| Politeness default | ~1 req/s per domain | Real throughput << raw worker count |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Sustained average fetch rate (refresh entire corpus in 30 days):**
 
 ```text
-Storage (raw HTML):
-  5B × 50KB ≈ 250 TB (+ metadata, indexes)
+Total pages         = 5,000,000,000
+Seconds in 30 days  = 30 × 86,400 = 2,592,000 seconds
 
-Sustained fetch rate for monthly refresh:
-  5B / (30 × 86400) ≈ 1,900 pages/s average
-  Peak with parallelism ≈ 50k–100k pages/s
-
-URL frontier (queue):
-  Billions of URLs — cannot fit in one Redis list
-  → partitioned queues by hash(domain)
-
-Metadata DB:
-  5B rows × ~500B ≈ 2.5 TB (+ indexes → several TB)
-
-Bandwidth:
-  100k pages/s × 50KB ≈ 5 GB/s egress
+Average fetch QPS   = 5,000,000,000 ÷ 2,592,000
+                    ≈ 1,930 pages/second (sustained)
 ```
 
-Insight: **URL frontier + dedup** dominate design. Fetch workers are stateless; coordination is in queues and bloom filters.
+Round to **~1,900 pages/s** — this is what you must sustain to recrawl monthly.
+
+**Peak fetch rate (parallel fleet):**
+
+```text
+Peak fetch QPS ≈ 50,000–100,000 pages/s (design target for large crawl)
+```
+
+Peak is **50×+ above average** — you crawl faster when needed, then throttle for politeness.
+
+**Enqueue rate (new URLs discovered while parsing):**
+
+Discovery adds URLs continuously. If each page yields ~10 new links and 90% are duplicates after dedup:
+
+```text
+New unique URLs/s ≈ 1,900 × 10 × 10% ≈ 1,900 enqueues/s (order of magnitude)
+```
+
+Dedup and frontier design must handle this steady **write** load to metadata.
+
+### Step B — Storage
+
+**Raw HTML in object storage:**
+
+```text
+Pages           = 5 billion
+Size per page   = 50 KB
+
+Raw HTML        = 5B × 50 KB = 250 TB
+With metadata   = 250 TB + indexes → plan for ~300 TB+
+```
+
+**URL metadata database:**
+
+```text
+URL rows        = 5 billion
+Bytes per row   ≈ 500 B (hash, URL, status, timestamps, blob pointer)
+
+Metadata raw    = 5B × 500 B = 2.5 TB
+With indexes    ≈ 5–8 TB (several TB total)
+```
+
+**Bloom filter for dedup (in memory, approximate):**
+
+```text
+5B URLs, 1% false-positive rate → roughly 5–6 GB per filter (varies by implementation)
+Often sharded by hash prefix across Redis/cluster nodes
+```
+
+### Step C — Bandwidth
+
+**Egress at peak crawl:**
+
+```text
+Peak fetch QPS   = 100,000 pages/s
+Page size        = 50 KB
+
+Bandwidth        = 100,000 × 50 KB
+                 = 5,000,000 KB/s
+                 ≈ 5 GB/s download throughput
+```
+
+**Sustained average bandwidth:**
+
+```text
+1,900 pages/s × 50 KB ≈ 95 MB/s (much lower than peak)
+```
+
+Bandwidth and **disk write speed** to object storage matter as much as CPU.
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Rate | Notes |
+|-----------|------|------|-------|
+| HTTP GET (fetch page) | Read (external) | ~1,900/s avg; 100k/s peak | Politeness caps per domain |
+| Dedup check | Read | ~1 per enqueue | Bloom + DB confirm |
+| URL enqueue / status update | Write | ~1,900/s+ | Metadata DB hot path |
+| Blob store write | Write | ~1,900/s avg | 250 TB total |
+| Parse / link extract | CPU | ~1,900/s avg | Emits new URLs to frontier |
+| Recrawl scheduler query | Read | Batch / periodic | Scans stale URLs |
+
+**Ratio:** roughly **1:1 fetch to metadata write** on the hot path; dedup reads are cheap compared to HTTP fetches.
+
+### What the numbers tell us
+
+- **250 TB of HTML** → object storage (S3), not a database  
+- **Billions of URL rows** → sharded metadata store (Cassandra/DynamoDB), not one Postgres  
+- **Frontier cannot be one queue** → partition by `hash(domain)` or Kafka topics  
+- **Bloom filters** save billions of DB lookups for dedup  
+- **1 req/s per domain** means 100k global QPS requires **100k+ distinct domains** in flight — fair scheduling across domains is critical  
+- Fetch workers are **stateless**; all coordination lives in frontier + dedup + metadata  
+
+### Common mistake for this problem
+
+Designing for **maximum HTTP QPS** without **per-domain politeness**. A crawler that ignores robots.txt and hammers one site at 10k req/s will get blocked and is unethical. Another mistake: storing **raw HTML in SQL** — at 250 TB, blobs belong in object storage; SQL holds metadata only.
 
 ## 4. High-Level Design (HLD)
 

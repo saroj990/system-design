@@ -33,22 +33,142 @@ Two people edit the same document at once. If you simply send "replace entire fi
 
 ## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 operations/day**. Collaborative editing is unusual: **ops/sec per document** is tiny, but **cluster-wide op throughput** adds up because many docs are open at once.
 
-- 5M documents, average 10 KB text  
-- 50k concurrently open documents  
-- 5 editors/doc peak for hot docs, 1–2 average  
-- 10 ops/sec/editor (keystrokes + deletes)  
+### Why we estimate
+
+Real-time docs are **message-size bound**, not storage bound. Estimates tell us:
+
+- Why you send **operations** (insert/delete), not full document text on every keystroke  
+- WebSocket **connection count** vs **op throughput** — both matter  
+- Most documents are **idle**; a few hot docs dominate ops  
+- **OT/CRDT** choice affects bytes per op, not just correctness  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Total documents | 5M | Persistent storage |
+| Average document size | 10 KB plain text | Snapshot + storage |
+| Concurrently open documents | 50k | Active editing sessions |
+| Editors per open doc (peak hot doc) | 5 | Contention on one doc |
+| Editors per open doc (average) | 1–2 | Typical case |
+| Ops per editor per second | 10 (keystrokes + deletes) | Typing speed + bursts |
+| Bytes per op (OT) | ~100 B JSON | Bandwidth |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Operations per second — naive upper bound (every open doc is hot):**
 
 ```text
-Storage        ≈ 5M × 10 KB ≈ 50 GB text (+ snapshots)
-Hot doc QPS    ≈ 50k docs × 3 editors × 10 ops/s ≈ 1.5M ops/s cluster-wide
-                 (most docs quiet — real peak lower, ~100k ops/s)
-WebSocket conns≈ 50k docs × 3 users ≈ 150k concurrent connections
-Bandwidth/op   ≈ 100 B × 1.5M ≈ 150 MB/s (order of magnitude)
+Open docs           = 50,000
+Editors per doc     = 3 (average active)
+Ops per editor/s    = 10
+
+Cluster op QPS      = 50,000 × 3 × 10
+                    = 1,500,000 ops/second
 ```
 
-Insight: **don't broadcast full document on every keystroke** — send small **operations** (insert/delete at position) and use **OT or CRDT** to merge them.
+**Realistic peak (most docs quiet — Pareto distribution):**
+
+```text
+Only ~10% of open docs actively editing at once:
+  5,000 hot docs × 5 editors × 10 ops/s = 250,000 ops/s
+
+Round to ~100,000 ops/s cluster-wide peak for interview planning
+```
+
+**Per-document op rate (hot doc with 5 editors):**
+
+```text
+5 editors × 10 ops/s = 50 ops/s per hot document
+Server must serialize + transform + broadcast each op in order (OT) or merge (CRDT)
+```
+
+**WebSocket connections:**
+
+```text
+Connections ≈ open docs × editors per doc
+            ≈ 50,000 × 3 ≈ 150,000 concurrent WebSocket connections
+```
+
+Gateway horizontal scaling driven by **connection count**, not CPU alone.
+
+### Step B — Storage
+
+**Document text (current snapshots):**
+
+```text
+Documents       = 5,000,000
+Avg size        = 10 KB
+
+Text storage    = 5M × 10 KB = 50 GB
+```
+
+**Operation log (append-only):**
+
+```text
+Assume 1,000 ops before snapshot compaction per active doc
+Active docs/day ≈ 500k (10% of corpus touched daily)
+Ops/day         ≈ 500k × 1,000 = 500M ops/day
+
+Op row size     ≈ 200 B (position, payload, author, rev)
+
+Daily op log    ≈ 500M × 200 B = 100 GB/day → compact to snapshots, keep tail in DB
+```
+
+**Snapshots in object storage:**
+
+```text
+Periodic full snapshots (50 GB corpus, versioned) → cheap on S3
+Op log in Postgres/DynamoDB for recent revisions
+```
+
+### Step C — Bandwidth
+
+**Op broadcast at cluster peak:**
+
+```text
+Peak ops          ≈ 100,000 ops/s (realistic) to 1.5M ops/s (worst case)
+Bytes per op      ≈ 100 B
+
+Bandwidth         = 100,000 × 100 B = 10 MB/s (realistic peak)
+Worst case        = 1.5M × 100 B = 150 MB/s (matches original order-of-magnitude)
+```
+
+**Presence/cursor updates (ephemeral, Redis):**
+
+```text
+Higher frequency than ops but tiny payload (~50 B)
+Not persisted — TTL in Redis
+```
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Rate | Notes |
+|-----------|------|------|-------|
+| Client sends edit op | Write | ~100k ops/s peak | WebSocket inbound |
+| Server broadcasts op | Read (fan-out) | ~100k × (N−1) editors | Pub/Sub per doc room |
+| Open doc (load snapshot + tail ops) | Read | ~50k opens/session start | One-time burst |
+| Persist op to log | Write | ~100k/s | Durable ordering |
+| Snapshot compaction | Write | Batch | Every N ops |
+| Presence update | Write | High | Ephemeral only |
+
+**Ratio:** editing session is **write-heavy** on ops; **open doc** is a read burst then steady writes.
+
+### What the numbers tell us
+
+- **Never broadcast full 10 KB doc on keystroke** — send ~100 B ops; 100× bandwidth savings  
+- **150k WebSocket connections** → dedicated gateway tier with sticky sessions or Pub/Sub fan-out  
+- **Hot doc (50 ops/s)** must be **serialized per document** — one ordering point (OT server or CRDT merge)  
+- **50 GB text** is tiny — op log growth and **compaction** matter more than raw storage  
+- **Snapshot every ~1,000 ops** keeps replay fast on document open  
+- Most docs idle → **shard Document Service by doc_id**; idle docs consume no memory  
+- **OT** = smaller ops, server transform; **CRDT** = larger ops, easier offline merge  
+
+### Common mistake for this problem
+
+Using **last-write-wins** or **locking the whole document** for collaboration — one editor blocks everyone, or concurrent edits overwrite each other. You need **OT or CRDT** so all clients **converge to identical text**. Another mistake: sending the **full document** over WebSocket on every change — at 10 ops/s × 10 KB, that's 100 KB/s per user vs ~1 KB/s with ops.
 
 ## 4. High-Level Design (HLD)
 

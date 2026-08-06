@@ -36,36 +36,101 @@ The core challenge is the **upload → transcode → distribute** pipeline, plus
 - **99.9% availability** for playback (CDN + multi-origin)
 - **Cost-efficient** storage tiering for long-tail videos
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+We do rough math so we know **what to optimize**. Exact precision is not the goal — **order of magnitude** is.
 
-- 500k uploads/day; average **5 GB** raw upload
-- Transcode to **4 renditions** averaging **30%** of original size total
-- 1B watch hours/month ≈ **385k concurrent streams** average (peak **~2M**)
-- Average watch bitrate **2 Mbps** (adaptive)
+### Why we estimate (beginner tip)
+
+Ask three questions:
+1. **How busy?** → QPS (requests per second)
+2. **How much data?** → storage (GB/TB)
+3. **How fat is the pipe?** → bandwidth (MB/s) when media matters
+
+Cheat sheet: **1 QPS ≈ 86,400 requests/day**. Peak is often **2–5×** average.
+
+### Assumptions (say these out loud)
+
+- **500k video uploads/day**; average raw upload **5 GB**
+- Transcode to **4 renditions** (360p, 720p, 1080p, etc.) totaling **~30% of original size** ≈ **1.5 GB** stored per video
+- **1B hours watched per month**; average playback bitrate **2 Mbps** (adaptive HLS)
+- Video metadata row ≈ **2 KB** (title, description, manifest URLs, status)
+- Popular videos cached at CDN edge; long-tail served from origin on cache miss
+
+### Step A — Traffic (QPS)
 
 ```text
-Upload ingress:
-  500k × 5 GB/day ≈ 2.5 PB/day ingress to object storage
-  Upload QPS ≈ 500k / 86,400 ≈ 6/s avg (large concurrent multipart)
+Upload QPS:
+  500k / day ÷ 86,400 ≈ 6/s average (each upload is long-running multipart)
+  Concurrent uploads at peak: hundreds to low thousands (not same as QPS)
 
-Transcode cluster:
-  10-min 1080p ≈ 5–15 min on 1 worker → need thousands of parallel workers / spot instances
+Concurrent streams (playback):
+  1B hours/month ÷ 730 hours/month ≈ 1.37M average concurrent viewers
+  Peak (rush hour multiplier ~2–3×)     ≈ 2–4M concurrent streams
 
-CDN egress (peak):
-  2M streams × 2 Mbps ≈ 4 Tbps peak
-  → major CDN; 95%+ edge hit rate for popular content
-
-Storage (transcoded, 1 year, no dedupe):
-  500k × 1.5 GB × 365 ≈ 270 PB/year
-  → lifecycle policies: S3 Standard → IA → Glacier for old long-tail
-
-Metadata DB:
-  500k/day × 365 × 2KB ≈ 365 GB/year ( manageable with sharding )
+Metadata API QPS (video detail, manifest URL):
+  Much lower than stream count — player hits CDN for segments, API for JSON
+  Estimate ~50k/s peak for browse/search/detail combined
 ```
 
-**Insight:** **Separate upload ingestion, transcoding farm, and CDN delivery.** Playback uses **HLS/DASH** segments from CDN — not a single MP4 download from API servers.
+### Step B — Storage
+
+```text
+Raw upload ingress per day:
+  500k × 5 GB ≈ 2.5 PB/day to S3 raw bucket
+
+Transcoded storage (1 year, 1.5 GB per video):
+  500k × 1.5 GB × 365 ≈ 270 PB/year
+
+Metadata DB (1 year):
+  500k × 365 × 2 KB ≈ 365 GB — manageable with sharding
+
+Lifecycle: Standard (hot 30 days) → IA → Glacier for long-tail
+```
+
+### Step C — Bandwidth / other (if relevant)
+
+CDN egress at peak playback (the dominant cost):
+
+```text
+2M concurrent streams × 2 Mbps ≈ 4 Tbps peak CDN egress
+
+Segment size (6s HLS chunk at 2 Mbps):
+  2 Mbps × 6s / 8 ≈ 1.5 MB per segment
+  Player fetches ~10 segments/min ≈ 15 MB/min/user
+
+Upload ingress:
+  2.5 PB/day ≈ 29 GB/s average raw upload to S3 (multipart, parallel parts)
+```
+
+Transcode compute (separate from bandwidth):
+
+```text
+10-min 1080p video ≈ 5–15 min on one FFmpeg worker
+500k uploads/day × 10 min avg ≈ need thousands of parallel transcode workers (spot instances)
+```
+
+### Step D — Read:write ratio
+
+| Path | Approx share | Implication |
+|------|--------------|-------------|
+| **Segment download (CDN read)** | ~99.9% of bytes | HLS/DASH segments from CDN — API never streams video |
+| **Manifest + metadata API** | Tiny QPS vs streams | Return `master.m3u8` URL; signed CDN URLs |
+| **Upload + transcode (write)** | 500k/day | Async pipeline: S3 event → queue → FFmpeg workers |
+| **View count beacons** | Fire-and-forget | Kafka → aggregate; approximate counts OK |
+
+### What the numbers tell us
+
+- **4 Tbps peak CDN egress** → major CDN provider; **95%+ edge hit rate** for popular content
+- **270 PB/year transcoded storage** → lifecycle policies; don't keep all renditions in Standard tier forever
+- **2.5 PB/day upload ingress** → multipart upload to S3; API only orchestrates, never proxies bytes
+- **Thousands of FFmpeg workers** → job queue + spot instances; transcode is async (minutes, not seconds)
+- **HLS 6-second segments** enable adaptive bitrate and fast start from CDN cache
+- **365 GB/year metadata** → API serves JSON + manifest URLs only; playback is 100% CDN
+
+### Common mistake for this problem
+
+Serving **one giant MP4 file** from the API server with progressive download. At 2M concurrent viewers × 2 Mbps, your origin dies — use **HLS/DASH segmented delivery** via CDN with adaptive bitrate switching.
 
 ## 4. High-Level Design (HLD)
 

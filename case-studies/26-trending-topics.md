@@ -32,27 +32,147 @@ Users expect trends to update every few minutes and reflect sudden spikes (break
 - Approximate counts are acceptable; exact counts not required  
 - Graceful degradation during traffic spikes  
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day**. Trending spikes during breaking news can hit **5–10× average** for minutes in one region.
 
-- 500M tweets/day globally  
-- Average 1.5 hashtags per tweet  
-- 50 regions (countries + major cities)  
-- Top K = 10 per region  
+### Why we estimate
+
+Trending hashtags sit between **firehose ingestion** (millions of tweets) and **cheap reads** (top-10 list per region). Estimates tell us:
+
+- Whether we can count in memory or need streaming aggregation  
+- Why we **precompute top-K** instead of sorting all hashtags on every read  
+- How many **unique tags per window** fit in RAM per region
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Tweets per day | 500M | Ingestion volume |
+| Hashtags per tweet (avg) | 1.5 | Counter increments per tweet |
+| Regions (countries + cities) | 50 | Partition trending by geo |
+| Top K displayed | 10 | Output size per region |
+| Window sizes | 15 min, 1 hr, 24 hr | Multiple counter maps |
+| Trend page refreshes | 10K QPS peak | Read path |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Hashtag counter increments (writes to aggregation layer):**
 
 ```text
-Hashtag events/day ≈ 500M × 1.5 ≈ 750M
-Write QPS ≈ 750M / 86400 ≈ 8,700/s avg, peak ~30,000/s
+Hashtag events/day  = 500M tweets × 1.5 hashtags/tweet
+                    = 750M counter increments/day
 
-Unique hashtags in 15-min window (per region): ~50K–200K active
-Trend reads: ~10K QPS (many users refresh trends page)
+Write QPS (avg)     = 750M ÷ 86,400
+                    ≈ 8,700 increments/second
 
-Memory per region (15-min counter map):
-  ~100K hashtags × (tag ~20B + count 8B) ≈ 3 MB → 50 regions ≈ 150 MB (hot set)
+Peak write QPS (3× viral event) ≈ 8,700 × 3
+                                ≈ 26,000 increments/second
 ```
 
-Insight: **don't sort the entire hashtag universe on every read** — maintain top-K incrementally and precompute results.
+Each tweet may bump 1–3 hashtag counters in 1–2 regions (user geo + global).
+
+**Trending page reads:**
+
+```text
+Assume 200M trend page views/day across all regions
+Read QPS (avg)        = 200M ÷ 86,400 ≈ 2,300 reads/second
+Peak (5×)             ≈ 11,500 reads/second
+Design for            ≈ 10K QPS peak (given assumption)
+```
+
+Reads must be **< 200 ms** — serve precomputed top-10 from cache.
+
+**Per-region write share:**
+
+```text
+Global + 50 regions — not every tweet hits every region
+Effective counters per tweet ≈ 1.2 region updates avg
+Regional write QPS (peak)  ≈ 26,000 × (1.2/51) ≈ 600/s per hot region
+US region might get 30% alone → ~8,000/s during viral US news
+```
+
+### Step B — Storage
+
+**In-memory counters (15-minute sliding window, per region):**
+
+```text
+Unique hashtags in 15-min window (per region) ≈ 100K active tags
+Bytes per entry     ≈ 28 B (tag string ~20 B + count 8 B)
+
+Memory per region   = 100K × 28 B ≈ 2.8 MB
+50 regions          ≈ 140 MB for 15-min window
+
+Three window sizes (15m, 1h, 24h):
+  24h window may hold ~2M unique tags/region → ~56 MB/region → ~2.8 GB total — still RAM-friendly
+```
+
+**Historical trend snapshots (optional):**
+
+```text
+Snapshots every 5 min × 50 regions × 10 tags × 100 B
+Per day ≈ 288 × 50 × 1 KB ≈ 14 MB/day — store in Postgres or S3 for “trends over time”
+```
+
+**Tweet stream (Kafka — not long-term storage for counters):**
+
+```text
+750M events/day × 200 B event ≈ 150 GB/day through Kafka
+Retention 24–48 hr → ~150–300 GB Kafka disk
+```
+
+### Step C — Bandwidth and other resources
+
+**Trend API response (read path):**
+
+```text
+Top-10 payload       ≈ 10 tags × 50 B (tag + count + rank) ≈ 500 B
+Peak read QPS        ≈ 10,000/s
+
+Egress               = 10,000 × 500 B ≈ 5 MB/s — trivial if precomputed
+```
+
+**Ingestion from tweet service:**
+
+```text
+Tweet events peak    ≈ 26,000 hashtag updates/s (same as counter writes)
+Event size           ≈ 200 B (tweet_id, hashtags[], region, timestamp)
+
+Kafka ingest         ≈ 26,000 × 200 B ≈ 5.2 MB/s — modest
+```
+
+**Top-K maintenance (avoid full sort):**
+
+```text
+Don't sort 100K tags on every read
+Use min-heap of size K per region — update O(log K) per increment
+Or batch recompute top-10 every 30–60 seconds in background worker
+```
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Avg QPS | Peak QPS | Notes |
+|-----------|------|---------|----------|-------|
+| Ingest tweet → increment counters | Write | ~8,700 | ~26,000 | Stream processing |
+| Fetch top-K trends (region) | Read | ~2,300 | ~10,000 | **Precomputed cache** |
+| Ban/spam filter check | Read | ~8,700 | ~26,000 | Bloom filter or blocklist |
+| Publish snapshot (worker) | Write | ~17/s | ~17/s | 50 regions / 3 windows every 60 s |
+| Admin override / block tag | Write | ~0.01 | ~1 | Rare |
+
+**Ratio:** counter **writes ~3× trend reads** on average — but reads must be instant; writes can lag 30–60 s.
+
+### What the numbers tell us
+
+- **~26K counter increments/s peak** → Kafka + stream processors (Flink/Storm/custom), not synchronous DB increments  
+- **~140 MB RAM** for 15-min counters across 50 regions — in-memory aggregation works  
+- **Precompute top-10 every 30–60 s** — reads hit Redis/ CDN cache, never sort 100K tags live  
+- **Multiple windows (15m/1h/24h)** — separate counter maps or time-bucketed keys with TTL  
+- **Spam/banned hashtags** — filter at ingest; one viral bot tag shouldn’t pollute trends  
+- **Regional partitioning** — US breaking news doesn’t require recomputing Iceland’s trends
+
+### Common mistake for this problem
+
+Running **`SELECT hashtag, COUNT(*) GROUP BY hashtag ORDER BY count`** on a SQL database for every trend refresh. At 750M events/day, that’s impossible. Another mistake: **exact counts** — approximate streaming counts (HyperLogLog or lossy counters) are fine for display. Finally, **global sort of all hashtags** on every tweet — use incremental top-K heaps per region.
 
 ## 4. High-Level Design (HLD)
 

@@ -38,31 +38,141 @@ When something happens in the product ("your ticket is confirmed", "friend liked
 
 ## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 operations/day**. Notification systems often **burst** (marketing campaigns, breaking news) — peak **2–5×** average is conservative; campaigns can spike higher.
 
-- 100M registered users  
-- Average 5 notifications/user/day (mix of push, email, SMS)  
-- 20% email, 70% push, 10% SMS  
+### Why we estimate
+
+Notifications must **never block** checkout or social APIs. Estimates tell us:
+
+- Why the API **enqueues** and returns `202 Accepted` instead of sending synchronously  
+- Why **separate queues per channel** matter (provider limits differ wildly)  
+- How **delivery logs** drive storage at 90-day retention  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Registered users | 100M | User base |
+| Notifications per user per day | 5 | Mix of transactional + marketing |
+| Channel split | 70% push, 20% email, 10% SMS | Different payloads and provider caps |
+| Email HTML size | ~50 KB | Template/blob storage |
+| Push payload | ~4 KB | FCM/APNs |
+| SMS length | ~160 chars | Small but expensive |
+| Delivery log retention | 90 days | Audit and analytics |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Total notifications per day:**
 
 ```text
-Total notifications/day ≈ 500M
-Average QPS ≈ 500M / 86400 ≈ 5,800/s
-Peak ≈ 3× ≈ 17,000/s
+Users                   = 100,000,000
+Notifications/user/day  = 5
 
-Email payload ~50KB HTML → offload to blob/template store
-SMS ~160 chars → small
-Push payload ~4KB
-
-Provider limits (typical):
-  Email: 100–1000/s per account (need multiple accounts / pools)
-  SMS: cost-driven; ~$0.01/msg → budget caps
-  Push (FCM/APNs): 100k+/s with batching
-
-Storage (delivery logs 90 days):
-  500M × 90 × ~300B metadata ≈ 13 TB (+ indexes)
+Daily notifications     = 100M × 5 = 500,000,000/day
 ```
 
-Insight: **Queue + workers per channel** with rate limiting to external providers. Core API must only enqueue, not send synchronously.
+**Average enqueue QPS (API accepts and queues):**
+
+```text
+Average QPS = 500,000,000 ÷ 86,400
+            ≈ 5,787 notifications/second
+            ≈ 5,800/s (round)
+```
+
+**Peak QPS (3× average — conservative for campaigns):**
+
+```text
+Peak QPS ≈ 5,800 × 3 ≈ 17,400/s
+         ≈ 17,000/s
+```
+
+**Per-channel peak QPS (same total, split by channel):**
+
+```text
+Push peak  = 17,000 × 70% ≈ 11,900/s
+Email peak = 17,000 × 20% ≈ 3,400/s
+SMS peak   = 17,000 × 10% ≈ 1,700/s
+```
+
+**Worker send rate vs provider limits:**
+
+```text
+Email: typical ESP limit 100–1,000/s per account
+       → need multiple accounts / IP pools for 3,400/s peak
+
+Push:  FCM/APNs can handle 100k+/s with batching → not the bottleneck
+
+SMS:  ~$0.01/msg × 500M/day × 10% = $500k/day at scale → budget caps matter more than QPS
+```
+
+### Step B — Storage
+
+**Delivery log metadata (90 days):**
+
+```text
+Notifications/day       = 500M
+Retention               = 90 days
+Total log rows          = 500M × 90 = 45 billion rows
+
+Bytes per row           ≈ 300 B (IDs, status, timestamps, channel, provider ref)
+
+Raw metadata            = 45B × 300 B ≈ 13.5 TB
+With indexes            ≈ 15–20 TB
+```
+
+**Email templates and rendered bodies:**
+
+```text
+Templates in DB/S3 — small catalog (thousands), not 500M copies
+Rendered HTML stored briefly or not at all — provider holds copy
+```
+
+**User preferences + device tokens:**
+
+```text
+100M users × ~200 B ≈ 20 GB — trivial compared to delivery logs
+```
+
+### Step C — Bandwidth
+
+**Outbound payload at peak (rough):**
+
+```text
+Push:  11,900/s × 4 KB   ≈ 48 MB/s
+Email: 3,400/s × 50 KB   ≈ 170 MB/s  ← largest channel by bytes
+SMS:   1,700/s × 160 B   ≈ 0.27 MB/s
+
+Total egress ≈ 220 MB/s peak (dominated by email HTML)
+```
+
+Email bandwidth is why **templates live in blob store** and workers stream from cache.
+
+### Step D — Read:write ratio table
+
+| Operation | Type | QPS | Notes |
+|-----------|------|-----|-------|
+| `POST /notifications` (enqueue) | Write | ~5,800 avg; ~17k peak | Must return in ms |
+| Preference lookup | Read | ~5,800/s | Filter channels |
+| Dedup / idempotency check | Read | ~5,800/s | Prevent duplicate sends |
+| Worker → provider send | Write (external) | Per channel | Rate-limited |
+| Delivery log update | Write | ~5,800/s | Status tracking |
+| Webhook status update | Write | Lower | Bounces, delivery receipts |
+| `GET /notifications/:id` | Read | Low | Status polling |
+
+**Ratio:** enqueue path is **write-heavy**; product APIs should only **write once to queue**, not call SendGrid synchronously.
+
+### What the numbers tell us
+
+- **Core API enqueues only** — 5,800/s is easy for a stateless API; workers absorb provider latency  
+- **Separate queues for push, email, SMS** — slow email must not block fast push  
+- **Email provider limits** (100–1k/s per account) force **multiple ESP accounts** or **bulk queue throttling**  
+- **13+ TB of delivery logs** → partition by date, tier to cold storage after 90 days  
+- **Idempotency keys** essential — upstream retries at 5,800/s would duplicate without dedup  
+- **SMS cost** often drives product policy (opt-in, caps) more than architecture  
+
+### Common mistake for this problem
+
+**Sending synchronously in the API** (`POST /notifications` waits for SendGrid). At 17k/s peak, that couples product latency to provider SLA and causes timeouts. Correct pattern: **validate → dedup → enqueue → 202 Accepted**. Another mistake: **one queue for all channels** — a slow SMS provider stalls push delivery.
 
 ## 4. High-Level Design (HLD)
 

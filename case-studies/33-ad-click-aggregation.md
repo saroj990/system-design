@@ -48,34 +48,142 @@ Challenges: **extreme volume**, **duplicate events** (retries, client bugs), **l
 
 ## 3. Back-of-the-envelope
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a Google Ads billing spec. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day** (86,400 seconds in a day). Ad pipelines are **extreme ingest volume** with **dedup accuracy** requirements — peak is often **3–5× average** during prime-time browsing.
 
-- 10B impressions/day, 200M clicks/day (2% CTR)  
-- Average event size 400 bytes  
-- Peak 5× average; 3 regions  
-- Dedup window: 24 hours  
+### Why we estimate
+
+Ad click/impression aggregation sits between **firehose ingestion** and **billing-grade accuracy**. Estimates tell us:
+
+- Whether **ingest ack latency** or **dedup store size** is the real bottleneck  
+- If we need a **durable log first** (never block ingestion on aggregation)  
+- How to split **fast counters** (Redis, minutes lag) from **authoritative OLAP** (ClickHouse, T+1 billing)  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Impressions/day | 10B | Dominates event volume (~98% of events) |
+| Clicks/day | 200M | 2% CTR — still huge; billing-critical |
+| Avg event size | 400 B | JSON with adId, campaignId, userId, timestamps |
+| Peak multiplier | 5× average | Evening prime time, holiday campaigns |
+| Regions | 3 | Partition dedup and aggregation |
+| Dedup window | 24 hours | Retries and client bugs replay same eventId |
+| Active ads | 100K | Drives rollup row count |
+
+### Step A — Traffic (QPS / throughput) with labeled arithmetic
+
+**Impression rate:**
 
 ```text
-Impression avg ≈ 10B / 86,400 ≈ 115,700/s
-Click avg      ≈ 200M / 86,400 ≈ 2,300/s
-Combined avg   ≈ 118,000/s
-Peak           ≈ 590,000/s
-
-Daily raw volume ≈ 10.2B × 400 B ≈ 4 TB/day uncompressed
-Compressed (~5×) ≈ 800 GB/day in object storage
-
-Dedup store (24h):
-  10.2B event IDs × 16 B (UUID hash) ≈ 163 GB
-  → Redis Cluster / DynamoDB TTL partitions by hour
-
-Hourly rollup rows:
-  100K active ads × 24 h × 30 days ≈ 72M rows/month (manageable in OLAP)
-
-Unique users (HyperLogLog):
-  per campaign per day: ~12 KB × 10K campaigns ≈ 120 MB/day
+Impressions/day   = 10,000,000,000
+Avg impression QPS = 10B ÷ 86,400
+                   ≈ 115,700 impressions/second
 ```
 
-Insight: **never block ingestion on aggregation** — durable log first; **idempotent dedup + windowed aggregation** in stream processors; separate **fast counters** (Redis) from **authoritative OLAP** (ClickHouse/BigQuery).
+**Click rate:**
+
+```text
+Clicks/day        = 200,000,000
+Avg click QPS     = 200M ÷ 86,400
+                  ≈ 2,300 clicks/second
+```
+
+**Combined ingest (impressions + clicks):**
+
+```text
+Combined avg QPS  = 115,700 + 2,300
+                  ≈ 118,000 events/second
+
+Peak ingest QPS   = 118,000 × 5
+                  ≈ 590,000 events/second
+```
+
+**Per-region peak (3 regions, uneven load):**
+
+```text
+If US carries 50% of traffic:
+  US peak ≈ 295,000 events/s
+  → Each region needs independent ingest + dedup partition
+```
+
+### Step B — Storage
+
+**Daily raw event volume (before compression):**
+
+```text
+Total events/day  = 10B impressions + 200M clicks ≈ 10.2B events
+Bytes per event   = 400 B
+
+Raw/day           = 10.2B × 400 B ≈ 4 TB/day uncompressed
+Compressed (~5×)  ≈ 800 GB/day in object storage (cold tier)
+```
+
+**Dedup store (24-hour TTL — must fit in fast storage):**
+
+```text
+Event IDs in 24h  = 10.2B unique eventIds
+Hash per ID       = 16 B (UUID or composite hash)
+
+Dedup memory      = 10.2B × 16 B ≈ 163 GB
+  → Redis Cluster or DynamoDB with TTL partitioned by hour
+  → Cannot use a single Redis node; shard by eventId hash
+```
+
+**Hourly rollup rows (OLAP — manageable):**
+
+```text
+100K active ads × 24 hours × 30 days ≈ 72M rows/month
+  → ClickHouse / BigQuery territory, not the ingest bottleneck
+```
+
+**Unique user reach (HyperLogLog — approximate):**
+
+```text
+~12 KB per campaign per day × 10K campaigns ≈ 120 MB/day
+  → Exact distinct counts at 10B/day are prohibitively expensive
+```
+
+### Step C — Bandwidth / other
+
+**Ingest bandwidth (peak):**
+
+```text
+590,000 events/s × 400 B ≈ 236 MB/s peak ingest
+  → HTTP/gRPC from ad servers and click pixels across 3 regions
+  → Ack within 50 ms p99; processing is async after ack
+```
+
+**Aggregation lag budget:**
+
+```text
+Dashboard counters  → < 5 minutes lag (stream processors → Redis)
+Billing rollups     → T+1 authoritative (OLAP reconciliation)
+  → Two tiers: fast approximate vs slow exact
+```
+
+### Step D — Ratios and capacity table
+
+| Metric | Average | Peak | Notes |
+|--------|---------|------|-------|
+| Impression QPS | ~115,700/s | ~578,500/s | ~98% of ingest volume |
+| Click QPS | ~2,300/s | ~11,500/s | Billing-critical — dedup mandatory |
+| Impression:click ratio | ~50:1 | ~50:1 | 2% CTR |
+| Raw storage/day | ~4 TB | — | ~800 GB compressed |
+| Dedup store (24h) | ~163 GB | — | Sharded TTL store |
+| Rollup rows/month | ~72M | — | OLAP, not hot path |
+
+### What the numbers tell us
+
+- **~118K events/s average, ~590K/s peak** → durable log first (Kafka/Kinesis); never block ingest on aggregation  
+- **Impressions dominate 50:1 over clicks** → optimize impression path; clicks get stricter dedup and audit  
+- **163 GB dedup store for 24h** → partition by hour + TTL; Redis Cluster, not one node  
+- **4 TB/day raw** → tier hot (hours) vs cold (months); compress before object storage  
+- **72M rollup rows/month is manageable** → separate fast counters (Redis) from authoritative OLAP  
+- **Billing accuracy 0.01%** → idempotent aggregation keyed by `(eventType, eventId)`; at-least-once ingest is OK if dedup is correct  
+
+### Common mistake for this problem
+
+**Blocking ingestion on aggregation** — trying to update campaign counters synchronously before returning HTTP 200. Interviewers want: ack fast → durable log → async stream processor → idempotent dedup + windowed aggregation. Another mistake: using **exact distinct user counts** at 10B events/day — HyperLogLog or sampled sketches are the pragmatic choice for reach metrics.
 
 ## 4. High-Level Design (HLD)
 
