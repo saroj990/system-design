@@ -31,26 +31,146 @@ After each game session, a player's score should reflect on leaderboards within 
 - Approximate tie-breaking rules documented (same score → earlier timestamp wins)  
 - Available during game peaks; degrade gracefully (slightly stale OK for non-critical views)  
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day**. Gaming peaks (evenings, new season launch) often hit **2–5× average** — reads spike harder than writes.
 
-- 5M DAU; 20 games/user/day  
-- 10 leaderboard partitions (games/modes)  
-- Read:write ≈ 50:1 for rank lookups vs score posts  
+### Why we estimate
+
+Leaderboards are **write-on-score, read-constantly**. Players check rank after every game and browse top-10 obsessively. Estimates tell us:
+
+- Whether **Redis sorted sets** can hold hot boards in memory  
+- If **read QPS** (not writes) drives infrastructure  
+- When friend-scoped boards need a different query path than global
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Daily active users (DAU) | 5M | Player base |
+| Games finished per user per day | 20 | Each game → one score write |
+| Leaderboard partitions (games/modes) | 10 | Separate ZSET per board |
+| Read:write ratio (rank lookups vs score posts) | 50:1 | Defines cache strategy |
+| Active players per board | ~1M | ZSET memory |
+| Score + member size in Redis | ~40 B | Memory per ranked entry |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Score submissions (writes):**
 
 ```text
-Score writes/day ≈ 5M × 20 = 100M
-Write QPS ≈ 100M / 86400 ≈ 1,160/s avg, peak ~10,000/s
+Scores per day      = 5M users × 20 games/user
+                    = 100M score updates/day
 
-Read QPS ≈ 50 × 1,160 ≈ 58,000/s avg, peak ~500,000/s
+Write QPS (avg)     = 100M ÷ 86,400
+                    ≈ 1,160 writes/second
 
-Redis sorted set memory (per board):
-  1M players × ~40 B ≈ 40 MB per active board (score + member)
-  10 boards ≈ 400 MB hot data — fits Redis cluster easily
+Peak write QPS (5× evening) ≈ 1,160 × 5
+                            ≈ 5,800 writes/second
 ```
 
-Insight: **Redis sorted sets (ZSET)** give O(log N) rank updates and range queries — ideal for this workload.
+Each write is a `ZADD` to one of 10 board keys — O(log N) per update.
+
+**Rank reads (lookups):**
+
+```text
+Read:write ratio      = 50:1
+
+Read QPS (avg)        = 1,160 × 50
+                      ≈ 58,000 reads/second
+
+Peak read QPS (5×)    ≈ 58,000 × 5
+                      ≈ 290,000 reads/second
+```
+
+Reads include: top-10, my rank, neighbors ±5, friends board.
+
+**Top-N queries (subset of reads):**
+
+```text
+Assume 30% of reads are top-100 fetches
+Top-N QPS (peak)    ≈ 290,000 × 30% ≈ 87,000/s
+→ Cache top-100 per board in Redis string or local cache (refresh every 1–2 s)
+```
+
+### Step B — Storage
+
+**Redis sorted sets (hot in-memory):**
+
+```text
+Players per board   = 1M active scorers
+Bytes per entry     ≈ 40 B (member ID + score + skip list overhead)
+
+Memory per board    = 1M × 40 B ≈ 40 MB
+10 boards           ≈ 400 MB total — fits one Redis cluster easily
+
+At 10M players/board → 400 MB each → 4 GB for 10 boards — still Redis-friendly
+```
+
+**Historical scores (optional archive):**
+
+```text
+If storing every game result in Postgres:
+  100M rows/day × 50 B ≈ 5 GB/day → partition or skip for MVP
+MVP: only keep **best score per user per board** in Redis
+```
+
+**Weekly reset boards:**
+
+```text
+Duplicate ZSET keys per week: `board:game1:2026-W32`
+Old keys TTL after 7 days — bounded memory
+```
+
+### Step C — Bandwidth and other resources
+
+**API response sizes:**
+
+```text
+Top-10 response     ≈ 10 players × 100 B ≈ 1 KB
+Peak top-N QPS      ≈ 87,000/s (cached path)
+
+Uncached egress     = 87,000 × 1 KB ≈ 87 MB/s — fine if cached; raw ZREVRANGE on every read is CPU-heavy not bandwidth-heavy
+```
+
+**Rank + neighbors query:**
+
+```text
+ZRANK + ZREVRANGE window ≈ 11 members × 100 B ≈ 1.1 KB
+Peak rank reads       ≈ 200,000/s × 1 KB ≈ 200 MB/s — Redis handles in-memory
+```
+
+**Redis CPU at peak:**
+
+```text
+290,000 reads/s + 5,800 writes/s ≈ 300K ops/s
+Modern Redis cluster: 100K–500K ops/s per shard → 1–3 shards sufficient
+```
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Avg QPS | Peak QPS | Notes |
+|-----------|------|---------|----------|-------|
+| Submit score (ZADD) | Write | ~1,160 | ~5,800 | One per game end |
+| Get top N | Read | ~17,400 | ~87,000 | **Cache aggressively** |
+| Get my rank (ZRANK) | Read | ~29,000 | ~145,000 | O(log N) |
+| Get neighbors ±5 | Read | ~11,600 | ~58,000 | ZREVRANGE by rank |
+| Friends board | Read | ~500 | ~2,500 | Filter friend IDs after fetch |
+
+**Ratio:** **~50:1 reads to writes** — optimize read path with cached top-N and pipelining.
+
+### What the numbers tell us
+
+- **Redis ZSET is the right tool** — 400 MB for 10 boards, O(log N) updates at 5,800/s peak  
+- **Reads (~290K/s peak) dominate** — cache top-100 per board; refresh async every 1–2 s  
+- **Writes (~5,800/s peak)** are easy for Redis — don’t shard until boards exceed single-node ops  
+- **Tie-break:** same score → earlier timestamp wins — encode as `score.timestamp` composite or secondary sort  
+- **Friends leaderboard** — don’t build separate global sort; fetch friend IDs then `ZSCORE` batch or maintain friend-only ZSETs for whales  
+- **Weekly resets** — new key per period with TTL; avoid deleting 1M members synchronously
+
+### Common mistake for this problem
+
+Using **Postgres ORDER BY score** for live ranks at 5,800 writes/s and 290K reads/s — full table scans kill you. Another mistake: **exact real-time top-10 on every read** — precompute and cache; 1–2 s staleness is fine. Finally, ignoring **tie-breaking rules** — ambiguous ranks frustrate players and interviewers notice.
 
 ## 4. High-Level Design (HLD)
 

@@ -43,30 +43,134 @@ You must define **conflict resolution**, **consistency tiers per entity**, and *
 
 ## 3. Back-of-the-envelope
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a Spanner deployment plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day** (86,400 seconds in a day). Active-active multi-region is **write-modest globally** but **conflict-prone locally** — the surprise is concurrent edits, not raw QPS.
 
-- 3 regions: us-east, eu-west, apac  
-- 100M active users; 10M DAU write 5 ops/day → 50M writes/day  
-- 20% writes touch same logical keys across regions within 5 s (conflict-prone)  
-- Average record 2 KB; 500M total records  
+### Why we estimate
+
+Multi-region active-active means **concurrent writes to the same logical object** from different continents. Estimates tell us:
+
+- Whether **cross-region replication bandwidth** or **conflict resolution** is the real bottleneck  
+- Which entity types can use **CRDTs / LWW** vs which must stay **single-leader**  
+- How **vector clocks** and **replication lag** affect the conflict rate  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Regions | 3 (US, EU, APAC) | Each can accept local writes |
+| Active users | 100M | Total user base |
+| DAU | 10M | Users who write daily |
+| Writes per DAU per day | 5 ops | Profile edits, cart updates, doc saves |
+| Conflict-prone writes | 20% of writes | Same key edited in 2+ regions within 5 s |
+| Avg record size | 2 KB | JSON document or cart row |
+| Total records | 500M | Users + documents + carts |
+
+### Step A — Traffic (QPS / throughput) with labeled arithmetic
+
+**Global write rate:**
 
 ```text
-Write avg ≈ 50M / 86,400 ≈ 580/s global (~200/s per region)
-Read avg  ≈ 10× writes ≈ 5,800/s global
+Writes/day        = 10M DAU × 5 ops = 50,000,000 writes/day
+Avg write QPS     = 50M ÷ 86,400
+                  ≈ 580 writes/second (global)
 
-Cross-region replication:
-  580 writes/s × 2 KB × 2 remote copies ≈ 2.3 MB/s inter-region (modest)
-
-Conflict rate:
-  20% of 580 ≈ 116 concurrent conflicts/s peak → need resolution path
-
-Vector clock size:
-  3 regions → 3 integers per write; negligible overhead
-
-Storage × 3 regions ≈ 500M × 2 KB × 3 ≈ 3 TB (before compression)
+Per region (even split):
+  ≈ 200 writes/second per region average
 ```
 
-Insight: **classify data** — counters and sets → CRDTs; user profile → LWW + field merge; inventory → **avoid active-active** or use strong leader per SKU; **vector clocks** detect concurrency; **replication log** per region with merge on apply.
+**Global read rate (assume 10:1 read:write):**
+
+```text
+Avg read QPS      ≈ 580 × 10 ≈ 5,800 reads/second (global)
+Per region        ≈ 1,900 reads/second
+```
+
+**Conflict rate (concurrent edits — the hard part):**
+
+```text
+Conflict-prone    = 20% of 580 writes/s ≈ 116 writes/s globally
+  where two regions touch the same key within the replication lag window (~5 s)
+  → Need resolution path: LWW, CRDT merge, or application-level merge
+```
+
+### Step B — Storage
+
+**Logical data (single copy):**
+
+```text
+Total records     = 500,000,000
+Bytes per record  = 2 KB
+
+Logical storage   = 500M × 2 KB ≈ 1 TB
+```
+
+**Replicated across 3 regions:**
+
+```text
+Storage × 3 regions ≈ 1 TB × 3 ≈ 3 TB (before compression)
+  Each region holds a full replica for local read latency
+```
+
+**Vector clock overhead (negligible):**
+
+```text
+3 regions → 3 integers per write version
+  ≈ 12 B per write — irrelevant compared to 2 KB records
+```
+
+**Conflict log / tombstones:**
+
+```text
+116 conflicts/s × 86,400 × 2 KB ≈ 20 GB/day conflict metadata
+  → Admin merge UI + audit trail for critical entities
+```
+
+### Step C — Bandwidth / other
+
+**Cross-region replication (async):**
+
+```text
+580 writes/s × 2 KB × 2 remote copies ≈ 2.3 MB/s inter-region bandwidth
+  Modest — WAN bandwidth is NOT the bottleneck; conflicts and consistency are
+```
+
+**Replication lag target:**
+
+```text
+p99 lag < 5 s under normal load
+  → Conflicts happen when lag < edit frequency on same key
+  → Session stickiness gives read-your-writes within a region
+```
+
+**Regional write latency:**
+
+```text
+Target p99 < 30 ms → local WAL + async replicate (not cross-region quorum on every write)
+```
+
+### Step D — Ratios and capacity table
+
+| Metric | Global avg | Per region | Notes |
+|--------|------------|------------|-------|
+| Write QPS | ~580/s | ~200/s | Active-active — all regions write |
+| Read QPS | ~5,800/s | ~1,900/s | 10:1 read:write |
+| Conflict rate | ~116/s | ~40/s | 20% of writes — needs resolution |
+| Logical storage | ~1 TB | — | 500M × 2 KB records |
+| Replicated storage | ~3 TB | ~1 TB/region | Full replica per region |
+| Cross-region bandwidth | ~2.3 MB/s | — | Modest; not the bottleneck |
+
+### What the numbers tell us
+
+- **580 writes/s global is modest** → raw QPS is not the hard problem; **conflicts and consistency tiers** are  
+- **~116 concurrent conflicts/s** → classify data: counters → CRDTs; profiles → LWW + field merge; inventory → **avoid active-active**  
+- **3 TB replicated storage is small** → this design point is about **CAP trade-offs**, not petabyte scale  
+- **2.3 MB/s cross-region replication** → WAN bandwidth is fine; **5 s lag window** creates conflict surface  
+- **Read-your-writes via session stickiness** → route user to same region after write  
+- **Vector clocks are cheap** → use them to *detect* concurrency; resolution strategy is per entity type  
+
+### Common mistake for this problem
+
+Applying **active-active to inventory or financial balances** — concurrent decrements cause overselling even with CRDTs. Interviewers want you to **classify data by consistency needs**: shopping cart and user profile → active-active with merge; SKU inventory → single leader per SKU or reservation + TTL. Another mistake: pretending **CAP doesn't apply** — you must choose AP with conflict resolution or CP with a single write region.
 
 ## 4. High-Level Design (HLD)
 

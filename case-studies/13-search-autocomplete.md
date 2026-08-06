@@ -34,30 +34,132 @@ On each keystroke (or every few characters), the client sends a prefix query lik
 
 ## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day**. Autocomplete breaks that rule because **every keystroke can fire a request** — client debounce is essential to cut volume.
 
-- 500M daily active search users  
-- Average 8 keystrokes per search box interaction → 8 autocomplete calls (before debounce)  
-- Client debounce 150 ms → ~3 effective calls per search  
-- 500M searches/day × 3 ≈ **1.5B autocomplete requests/day**  
+### Why we estimate
+
+Autocomplete sits on the **critical search path** with a **p99 < 50 ms** target. Estimates tell us:
+
+- Why you cannot run `LIKE 'prefix%'` on a database at request time  
+- How **client debounce** changes QPS by 2–3×  
+- Whether the index must live **in memory** (yes, at this scale)  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Daily active search users | 500M | Base traffic volume |
+| Keystrokes per search interaction | 8 (before debounce) | Upper bound on raw calls |
+| Client debounce | 150 ms | Collapses redundant requests |
+| Effective API calls per search | ~3 | After debounce + min prefix length |
+| Unique query strings in index | ~500M | Long tail storage |
+| Top-K suggestions returned | 10 | Fixed response size |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Daily autocomplete requests:**
 
 ```text
-Average QPS ≈ 1.5B / 86400 ≈ 17,000/s
-Peak QPS ≈ 5× avg ≈ 85,000/s (regional peaks higher)
+Searches per day        = 500,000,000
+Calls per search        = 3 (after debounce)
 
-Unique query strings in index: ~500M (long tail)
-Popular prefixes hot in cache: top 1M prefixes serve 80% traffic
-
-Storage (trie / sorted index):
-  500M queries × ~30B avg ≈ 15 GB raw terms
-  + popularity scores, indexes → 50–100 GB in memory (sharded)
-
-Update rate:
-  Aggregate search logs → top queries refresh every 1–5 min
-  Write QPS to index low; batch updates
+Daily requests          = 500M × 3 = 1,500,000,000 requests/day
 ```
 
-Insight: This is a **read-heavy, latency-critical** problem. Precompute prefix → top-K offline; serve from memory/cache at request time.
+**Average QPS:**
+
+```text
+Average QPS = 1,500,000,000 ÷ 86,400
+            ≈ 17,361 requests/second
+            ≈ 17,000/s (round for interview)
+```
+
+**Peak QPS (5× average, regional spikes higher):**
+
+```text
+Peak QPS ≈ 17,000 × 5 ≈ 85,000/s
+```
+
+**Without debounce (why debounce matters):**
+
+```text
+Raw calls = 500M searches × 8 keystrokes = 4B requests/day
+Raw QPS   = 4B ÷ 86,400 ≈ 46,000/s  → 2.7× worse than debounced
+```
+
+**Index update traffic (async, off hot path):**
+
+```text
+Search log ingest: high volume, but batched every 1–5 minutes
+Write QPS to live trie: effectively 0 at request time — full snapshot rebuild + swap
+```
+
+### Step B — Storage
+
+**Unique query strings (raw text):**
+
+```text
+Queries         = 500 million
+Avg term length ≈ 30 bytes
+
+Raw term text   = 500M × 30 B ≈ 15 GB
+```
+
+**In-memory trie with top-K at each node:**
+
+```text
+15 GB raw terms + trie structure overhead + top-10 heaps per node
+Total in memory ≈ 50–100 GB (sharded across nodes)
+
+Top 1M prefixes serve ~80% of traffic → fits easily in Redis + local LRU
+```
+
+**Snapshot files (for rolling reload):**
+
+```text
+Serialized trie snapshot ≈ 50–100 GB per locale → stored in S3, loaded at pod start
+```
+
+### Step C — Bandwidth
+
+**Response size per suggest call:**
+
+```text
+10 suggestions × ~40 B JSON each ≈ 400 B payload + overhead ≈ 1 KB/response
+
+Peak egress ≈ 85,000/s × 1 KB ≈ 85 MB/s (modest — latency, not bandwidth, is the constraint)
+```
+
+**Search log ingest (write side):**
+
+```text
+500M searches/day × ~100 B log line ≈ 50 GB/day of raw logs → Kafka, not the suggest API
+```
+
+### Step D — Read:write ratio table
+
+| Operation | Type | QPS | Notes |
+|-----------|------|-----|-------|
+| `GET /suggest` | Read | ~17k avg; ~85k peak | Must be < 50 ms p99 |
+| Trie lookup | Read | Same | O(prefix length) walk |
+| L1/L2 cache hit | Read | ~80% of prefix traffic | Hot prefixes |
+| Search log append | Write | ~5,800/s avg | Separate pipeline |
+| Index rebuild | Write | Batch every 1–5 min | Zero-downtime pointer swap |
+
+**Ratio:** **millions : 1 read-to-write** on the hot suggest path — classic read-heavy, precompute pattern.
+
+### What the numbers tell us
+
+- **17k–85k read QPS** with **< 50 ms p99** → precomputed **trie + top-K per node**, not database queries  
+- **Client debounce cuts QPS ~3×** — mention it proactively in interviews  
+- **50–100 GB in memory** → shard tries by first character or hash prefix across servers  
+- **80% traffic on top 1M prefixes** → Redis + in-process LRU cache is high ROI  
+- **Index updates are async** — batch rebuild from search logs; swap snapshot without downtime  
+- Long tail (500M queries) is fine **offline**; hot path only walks a trie  
+
+### Common mistake for this problem
+
+Proposing **Elasticsearch** or **`SELECT ... LIKE 'prefix%'`** on every keystroke. At 85k QPS and 500M rows, that cannot hit p99 < 50 ms. The correct pattern is **offline precomputation + in-memory serve + cache**. Another mistake: forgetting **debounce** and overstating QPS by 2–3×.
 
 ## 4. High-Level Design (HLD)
 

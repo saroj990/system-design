@@ -36,32 +36,95 @@ Photos dominate **bandwidth and storage** — the architecture centers on object
 - **Durability** — uploaded photos must not be lost
 - Feed read latency similar to news feed case study
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+We do rough math so we know **what to optimize**. Exact precision is not the goal — **order of magnitude** is.
 
-- 50M photos/day uploaded
-- Average original **2 MB**; serve **3 sizes** (thumb 20KB, feed 200KB, full 800KB)
-- Average metadata row **500 bytes**
-- Each DAU views feed **3×/day**, ~20 images per scroll
+### Why we estimate (beginner tip)
+
+Ask three questions:
+1. **How busy?** → QPS (requests per second)
+2. **How much data?** → storage (GB/TB)
+3. **How fat is the pipe?** → bandwidth (MB/s) when media matters
+
+Cheat sheet: **1 QPS ≈ 86,400 requests/day**. Peak is often **2–5×** average.
+
+### Assumptions (say these out loud)
+
+- **500M users**, **100M DAU**, **50M photos uploaded/day**
+- Average original photo **2 MB**; serve **3 sizes** (thumb 20 KB, feed 200 KB, full 800 KB)
+- Metadata row per photo ≈ **500 bytes** (caption, URLs, user_id, timestamps)
+- Each DAU scrolls feed **3×/day**, ~**20 images** per scroll
+- Feed fan-out reuses news-feed hybrid model (Case Study 06)
+
+### Step A — Traffic (QPS)
 
 ```text
-Upload QPS     ≈ 50M / 86,400 ≈ 580/s avg, peak ~3,000/s
-Feed read QPS  ≈ 100M × 3 / 86,400 ≈ 3,500/s avg
+Upload QPS (writes):
+  50M / day ÷ 86,400 ≈ 580/s average
+  Peak (5× avg)         ≈ 3,000/s
 
-Storage (originals, 1 year):
-  50M × 365 × 2 MB ≈ 36 PB/year originals
-  → at scale: compress, tier to cold storage, dedupe; MVP estimate smaller if users average 1 photo/day subset
+Feed read QPS:
+  100M DAU × 3 feeds/day = 300M feed loads/day
+  300M / 86,400 ≈ 3,500/s average
 
-CDN egress (feed images):
-  100M DAU × 3 feeds × 20 imgs × 200KB ≈ 12 PB/day egress
-  → CDN essential; 90%+ cache hit target
-
-Metadata DB/year:
-  50M × 365 × 500B ≈ 9 TB (+ indexes)
+Single photo view / profile browse (additional reads):
+  Roughly same order as feed reads — CDN serves bytes, API serves metadata
 ```
 
-**Insight:** **Never serve originals from app servers.** Flow: client → **S3** (direct upload) → async **thumbnail worker** → **CDN** URLs in feed API.
+### Step B — Storage
+
+```text
+Originals (1 year):
+  50M/day × 365 × 2 MB ≈ 36 PB/year
+
+Derived sizes (thumb + feed + full ≈ 1 MB total per photo):
+  50M × 365 × 1 MB ≈ 18 PB/year (often same S3 bucket, different keys)
+
+Metadata DB (1 year):
+  50M × 365 × 500 bytes ≈ 9 TB (+ indexes → ~15 TB)
+
+→ At scale: compress, dedupe, tier old originals to cold storage (Glacier)
+```
+
+### Step C — Bandwidth / other (if relevant)
+
+CDN egress (feed images — the dominant cost):
+
+```text
+100M DAU × 3 feeds × 20 images × 200 KB (feed size)
+  = 12 PB/day CDN egress
+
+At 3,500 feed QPS × 20 images × 200 KB ≈ 14 GB/s average CDN throughput
+  → CDN is mandatory; target 90%+ cache hit rate
+
+Upload ingress (originals):
+  580 uploads/s × 2 MB ≈ 1.2 GB/s average to S3 (presigned direct upload)
+```
+
+**Bandwidth dominates** this system — not QPS.
+
+### Step D — Read:write ratio
+
+| Path | Approx share | Implication |
+|------|--------------|-------------|
+| **Image bytes (CDN GET)** | ~95% of bandwidth | Never serve from app servers; S3 + CloudFront |
+| **Feed metadata API (read)** | ~99% of API calls | Redis feed cache + batch metadata fetch |
+| **Upload + publish (write)** | ~1% of API calls | Presigned S3 upload; async image processing |
+| **Like / comment** | Small writes | Redis counter + async DB flush |
+
+### What the numbers tell us
+
+- **36 PB/year originals** → **S3 for blobs**, Postgres only for metadata — never store image bytes in SQL
+- **12 PB/day CDN egress** → client loads images from CDN URLs returned by feed API
+- **Presigned direct upload** keeps app servers off the 1.2 GB/s upload path
+- **Async transcoding worker** generates thumb/feed/full after S3 upload event
+- **~3k peak upload QPS** → queue + worker pool for resize; don't block API on ImageMagick
+- **Feed fan-out** same hybrid as news feed — precompute for normal users, pull for celebrities
+
+### Common mistake for this problem
+
+Proxying photo bytes **through the API server** ("upload to our backend, we forward to S3"). At 3,000 uploads/s × 2 MB, app servers become a bandwidth bottleneck — use **presigned URLs** for client → S3 direct upload.
 
 ## 4. High-Level Design (HLD)
 

@@ -33,24 +33,131 @@ Users need to discover products (by category, search, filters), view details, an
 
 ## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day**. E-commerce traffic **spikes during sales** — peak is often **3–5×** average on catalog reads and cart writes.
 
-- 10M monthly active users (MAU)  
-- 50M product SKUs in catalog  
-- 100:1 read:write on catalog  
-- Average 5 cart operations per session, 20M sessions/day  
+### Why we estimate
+
+E-commerce splits into two workloads with different shapes: **read-heavy catalog browse** vs **write-heavy cart mutations**. Estimates tell us:
+
+- Why catalog and cart should be **separate services** with different storage  
+- When **Redis + Elasticsearch** are worth the operational cost  
+- That **cart writes can exceed catalog reads** during active shopping sessions  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Monthly active users (MAU) | 10M | User base |
+| Product SKUs | 50M | Catalog + search index size |
+| Catalog read:write ratio | 100:1 | Admin updates vs browse |
+| Sessions per day | 20M | Shopping activity |
+| Cart operations per session | 5 | Add/update/remove items |
+| Product metadata size | ~2 KB | DB + cache sizing |
+| Search share of catalog reads | ~30% | Elasticsearch load |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Catalog reads per day:**
 
 ```text
-Catalog read QPS  ≈ 50M reads/day / 86,400 ≈ 580/s avg, peak ~3,000/s
-Cart write QPS    ≈ 20M sessions × 5 / 86,400 ≈ 1,160/s avg, peak ~6,000/s
-Search QPS        ≈ 30% of catalog reads ≈ 900/s peak
+Daily catalog reads   = 50,000,000 reads/day  (browse, detail, category pages)
 
-Product storage   ≈ 50M × 2 KB metadata ≈ 100 GB (+ images in object storage)
-Cart storage      ≈ 10M active carts × 500 B ≈ 5 GB (Redis)
-Search index      ≈ 50M docs × 1 KB ≈ 50 GB (Elasticsearch)
+Average catalog read QPS = 50,000,000 ÷ 86,400
+                         ≈ 579/s
+                         ≈ 580/s (round)
+
+Peak catalog read QPS  ≈ 580 × 5 ≈ 2,900/s → round to ~3,000/s
 ```
 
-Insight: **separate the read-heavy catalog from write-heavy cart**, and cache hot products aggressively.
+**Cart write QPS:**
+
+```text
+Cart ops/day          = 20M sessions × 5 ops = 100,000,000 ops/day
+
+Average cart write QPS = 100,000,000 ÷ 86,400
+                     ≈ 1,157/s
+                     ≈ 1,160/s (round)
+
+Peak cart write QPS  ≈ 1,160 × 5 ≈ 5,800/s → round to ~6,000/s
+```
+
+**Search QPS:**
+
+```text
+Search QPS (peak) ≈ 30% of catalog read peak
+                  ≈ 3,000 × 30% ≈ 900/s
+```
+
+### Step B — Storage
+
+**Product catalog (Postgres metadata):**
+
+```text
+SKUs            = 50,000,000
+Metadata/SKU    ≈ 2 KB
+
+Product data    = 50M × 2 KB = 100 GB
+Images          → object storage + CDN (not in Postgres)
+```
+
+**Shopping carts (Redis):**
+
+```text
+Active carts    ≈ 10M (logged-in + recent guests)
+Bytes per cart  ≈ 500 B (few line items average)
+
+Cart data       = 10M × 500 B ≈ 5 GB in Redis
+```
+
+**Search index (Elasticsearch):**
+
+```text
+50M docs × ~1 KB/doc ≈ 50 GB index size
+Facets and analyzers add overhead → plan ~80–100 GB cluster
+```
+
+### Step C — Bandwidth
+
+**Product detail API (cached):**
+
+```text
+Response size   ≈ 2 KB JSON
+Peak catalog QPS ≈ 3,000/s
+
+Egress          ≈ 3,000 × 2 KB ≈ 6 MB/s (API tier — images served from CDN)
+```
+
+**Image delivery (CDN, separate from API):**
+
+```text
+Dominates user-facing bandwidth — not counted against catalog service
+```
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Peak QPS | Storage |
+|-----------|------|----------|---------|
+| Browse category / product detail | Read | ~3,000/s | Redis cache + Postgres |
+| Search | Read | ~900/s | Elasticsearch |
+| Add/update/remove cart | Write | ~6,000/s | Redis |
+| Admin product update | Write | Very low | Postgres → CDC → ES |
+| Cart read (`GET /cart`) | Read | ~3,000/s (est.) | Redis |
+
+**Ratio:** catalog **100:1 read:write**; cart is **write-heavy** (~2:1 write:read during active shopping).
+
+### What the numbers tell us
+
+- **Split catalog and cart** — different QPS shapes and consistency needs  
+- **Catalog (3k read/s peak)** → Redis cache-aside + CDN for images; Postgres read replicas  
+- **Cart (6k write/s peak)** → Redis hashes with TTL; sub-ms writes, merge-on-login  
+- **Search (900/s peak)** → Elasticsearch via async CDC; seconds of index lag is OK  
+- **100 GB catalog** fits one Postgres with replicas; **50 GB ES index** needs sharding at 100M+ SKUs  
+- MVP **does not reserve inventory** at cart time — stock display is read-only until checkout (separate system)  
+- Flash sale on one SKU → **singleflight** + local cache for hot product key  
+
+### Common mistake for this problem
+
+Putting **shopping carts in Postgres** at 6k write/s peak — it works for MVP but Redis is the standard answer for session-scoped, high-churn cart state. Another mistake: **synchronous search indexing** on every admin edit — use **CDC + queue + worker** so catalog writes stay fast.
 
 ## 4. High-Level Design (HLD)
 

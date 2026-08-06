@@ -45,30 +45,139 @@ The hard part is not training a model offline — it is **serving ranked results
 
 ## 3. Back-of-the-envelope
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a TikTok capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day** (86,400 seconds in a day). Recommendation feeds are **extreme read volume** with a brutal **feature lookup × candidate multiplication** — peak is often **3–4× average** during prime-time scrolling.
 
-- 500M DAU, average **100 feed requests/user/day** → **50B requests/day**  
-- Each request recalls **2,000 candidates**, ranks top **50**  
-- Feature vector per (user, item) pair: **~200 floats** (800 B) for ranking  
-- Model inference batch: 500 candidates per GPU batch  
+### Why we estimate
+
+A recommendation feed must rank **millions of candidates per user** in **< 100 ms**. Estimates tell us:
+
+- Whether **feature store reads** or **GPU ranking inference** is the real bottleneck  
+- Why you cannot naively score 2,000 full neural models per request  
+- How **impression logging** drives a separate petabyte-scale training pipeline  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| DAU | 500M | Global short-video scale |
+| Feed requests/user/day | 100 | Heavy scrollers drive volume |
+| Catalog size | 10B items | Recall must prune aggressively |
+| Candidates recalled | 2,000 per request | Wide funnel before ranking |
+| Items ranked (scored) | 500 per request | After pruning — GPU batch size |
+| Items returned | 50 per request | Final feed page |
+| Feature vector size | ~200 floats (800 B) | Per (user, item) pair for ranking |
+| Impressions/day | 50B | 500M DAU × 100 requests |
+
+### Step A — Traffic (QPS / throughput) with labeled arithmetic
+
+**Feed request rate:**
 
 ```text
-Feed QPS        ≈ 50B / 86,400 ≈ 580,000/s avg, peak ~2M/s
-Feature reads   ≈ 580k × 2,000 candidates ≈ 1.16B feature lookups/s (not all unique)
-  → dedupe + batch: ~50M unique user-item feature fetches/s at peak (still huge)
+Feed requests/day = 500M DAU × 100 = 50,000,000,000/day
+Avg feed QPS      = 50B ÷ 86,400
+                  ≈ 580,000 requests/second
 
-Ranking compute ≈ 580k req/s × 500 scored items ≈ 290M inferences/s
-  → need massive GPU fleet + model distillation to smaller student models
-
-Impression logs  ≈ 50B/day × 50 items × 200B ≈ 500 TB/day raw (compressed ~50 TB/day)
-Training data    ≈ 30-day rolling window ≈ 1.5 PB compressed
-
-Feature store hot set:
-  500M users × 2 KB user features ≈ 1 TB
-  10B items × 1 KB item features ≈ 10 TB (only ~5% hot in memory ≈ 500 GB)
+Peak (×3–4 prime time):
+  ≈ 2,000,000 feed requests/second
 ```
 
-**Insight:** You cannot score 2,000 full neural rankers per request naively. Pipeline is **recall wide → prune → rank narrow → re-rank**. Feature store must be **precomputed + online join**, not computed on the fly.
+**Feature lookups (naive — before dedup):**
+
+```text
+Naive feature reads = 580K req/s × 2,000 candidates
+                    ≈ 1.16 billion feature lookups/second
+  → Impossible without dedup, batching, and precomputed embeddings
+```
+
+**Feature lookups (after dedup + batching — realistic):**
+
+```text
+Unique user features per request: 1
+Unique item features: ~30% overlap in recall set
+Effective unique fetches ≈ 50M/s at peak (still enormous → feature store sharding mandatory)
+```
+
+**Ranking inference (GPU-bound):**
+
+```text
+Inferences/s      = 580K req/s × 500 scored items
+                  ≈ 290 million inferences/second
+  → Requires massive GPU fleet + model distillation to smaller student models
+  → Batch 500 candidates per GPU call to amortize overhead
+```
+
+### Step B — Storage
+
+**Feature store — hot user features:**
+
+```text
+500M users × 2 KB user features ≈ 1 TB
+  → Sharded in-memory (Redis/RocksDB) with replication
+```
+
+**Feature store — item features (mostly cold):**
+
+```text
+10B items × 1 KB item features ≈ 10 TB total
+Hot set (~5% actively served) ≈ 500 GB in memory
+  → Long-tail items fetched from SSD tier on demand
+```
+
+**Impression logs (training feedback loop):**
+
+```text
+50B impressions/day × 50 items × 200 B per log entry
+  ≈ 500 TB/day raw
+
+Compressed (~10×) ≈ 50 TB/day
+30-day rolling window ≈ 1.5 PB compressed training data
+```
+
+### Step C — Bandwidth / other
+
+**Feed API response bandwidth (peak):**
+
+```text
+50 items × ~2 KB metadata per item ≈ 100 KB per feed response
+2M req/s × 100 KB ≈ 200 GB/s peak egress
+  → CDN for media; feed metadata is JSON — pagination + compression required
+```
+
+**Latency budget (p99 < 150 ms end-to-end):**
+
+```text
+Feature store read  → < 5 ms (hot features)
+Candidate recall    → < 30 ms (multi-source parallel)
+Ranking inference   → < 80 ms (GPU batch)
+Re-rank + filters   → < 20 ms
+Network + overhead  → ~15 ms
+```
+
+### Step D — Ratios and capacity table
+
+| Metric | Average | Peak | Notes |
+|--------|---------|------|-------|
+| Feed QPS | ~580K/s | ~2M/s | Primary serving load |
+| Candidates recalled | 2,000/req | — | Wide funnel |
+| Items scored (ranked) | 500/req | — | After pruning |
+| Items returned | 50/req | — | Final page |
+| Recall:rank:serve ratio | 2000:500:50 | — | Funnel narrows 40:10:1 |
+| GPU inferences/s | ~290M/s | ~1B/s | Batch 500 per call |
+| Impression log/day | ~500 TB raw | — | ~50 TB compressed |
+| Feature store hot | ~500 GB | — | 5% of 10B item catalog |
+
+### What the numbers tell us
+
+- **580K feed QPS average, 2M peak** → multi-stage funnel: recall wide → prune → rank narrow → re-rank  
+- **1.16B naive feature lookups/s is impossible** → precomputed embeddings, batch fetch, dedupe by itemId  
+- **290M GPU inferences/s** → model distillation, two-tower architecture (dot product, not full MLP per pair)  
+- **1.5 PB training data (30-day window)** → separate offline pipeline; serving path must not touch this  
+- **Feature store p99 < 5 ms** → hot user + item features in memory; cold tail on SSD  
+- **Fallback on model outage** → heuristic/trending rank preserves 99.95% availability SLO  
+
+### Common mistake for this problem
+
+Trying to **score all 2,000 candidates with a full deep neural ranker** per request — 580K × 2,000 = 1.16B model calls/s is infeasible. Interviewers want a **multi-stage funnel**: cheap recall (embeddings, graph) → prune to 500 → expensive rank → MMR re-rank to 50. Another mistake: **computing features at request time** — user and item features must be **precomputed in the feature store** with online join for cross-features only.
 
 ## 4. High-Level Design (HLD)
 

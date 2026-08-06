@@ -32,28 +32,152 @@ Developers write solutions to programming problems. On submit, code must execute
 - At-least-once execution with idempotent result writes  
 - P95 queue wait acceptable; execution time bounded by problem limit  
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day**. Traffic rarely stays flat; **peak is often 2–5× average** — and **contest endings can spike 10×+** for minutes.
 
-- 1M DAU; 5 submissions/user/day average  
-- 5K problems; ~20 hidden tests/problem avg  
-- Average execution 2 s (wall clock cap); worker pool  
+### Why we estimate
+
+An online judge has a **fast API path** (accept code, return submission ID) and a **slow worker path** (compile, run 20 test cases in sandbox). Estimates tell us:
+
+- How many **worker machines** we need at peak  
+- Whether storage for code + logs is the long-term cost  
+- Why an **async queue** is mandatory (never run user code on the API thread)
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Daily active users (DAU) | 1M | Submission volume |
+| Submissions per user per day | 5 | Includes practice + retries |
+| Problem catalog | 5K problems | Metadata + test case storage |
+| Hidden test cases per problem | ~20 avg | Worker execution time |
+| Average execution time | 2 s wall clock | Worker pool sizing |
+| Source code size per submit | ~10 KB | Cold storage growth |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Code submissions (API accept → queue):**
 
 ```text
-Submissions/day ≈ 1M × 5 = 5M
-Submit QPS ≈ 5M / 86400 ≈ 58/s avg, peak ~500/s
+Submissions per day  = 1M users × 5 submissions/user
+                     = 5M submissions/day
 
-Workers needed (peak):
-  if avg run = 2s, each worker ≈ 0.5 jobs/s
-  500 submissions/s → ~1000 concurrent workers (upper bound; batching helps)
+Submit QPS (avg)     = 5M ÷ 86,400
+                     ≈ 58 submissions/second
 
-Storage/year:
-  5M × 365 × ~10 KB code ≈ 18 TB/year (code + logs — tier cold storage)
-  Results metadata ≈ 1.8B rows × ~200 B ≈ 360 GB/year
+Peak submit QPS (5× contest) ≈ 58 × 5
+                             ≈ 290 submissions/second
 ```
 
-Insight: **API accepts fast; workers execute slow** — async queue is mandatory.
+The API only validates, stores code, and enqueues — **must respond in < 100 ms**.
+
+**Status polling / result reads:**
+
+```text
+Assume 10 polls per submission until done
+Poll QPS (avg)       = 58 × 10 ≈ 580 reads/second
+Peak                 ≈ 2,900 reads/second
+```
+
+Use WebSockets or long-polling to reduce blind polling.
+
+**Problem catalog reads (browse):**
+
+```text
+Assume 2M problem page views/day
+Browse QPS (avg)     = 2M ÷ 86,400 ≈ 23 reads/second
+```
+
+Low compared to submission path.
+
+### Step B — Storage
+
+**Source code archive:**
+
+```text
+Submissions per year = 5M × 365 ≈ 1.8B submissions
+Bytes per submit     ≈ 10 KB (code + language + metadata)
+
+Per year             = 1.8B × 10 KB ≈ 18 TB/year
+→ Tier to S3 cold storage after 90 days; DB keeps only pointer + verdict
+```
+
+**Verdict / results metadata:**
+
+```text
+Rows per year        = 1.8B
+Row size             ≈ 200 B (verdict, runtime_ms, memory_kb, timestamps)
+
+Results storage      = 1.8B × 200 B ≈ 360 GB/year — fits Postgres with partitioning by month
+```
+
+**Test cases (static, per problem):**
+
+```text
+Problems             = 5,000
+Tests per problem    = 20
+Input+output size    ≈ 5 KB avg per test
+
+Test case storage    = 5K × 20 × 5 KB ≈ 500 MB — tiny; load into worker memory at job start
+```
+
+### Step C — Bandwidth and other resources
+
+**Worker pool capacity (the real bottleneck):**
+
+```text
+Peak jobs arriving   = 290 submissions/second
+Average run time     = 2 seconds per job
+
+Concurrent workers needed = 290 jobs/s × 2 s
+                          ≈ 580 workers running simultaneously
+
+With 50% utilization buffer → ~1,200 worker containers at contest peak
+```
+
+Each worker is an isolated container (Docker/gVisor) — **CPU and memory**, not network, dominate.
+
+**Queue depth during spike:**
+
+```text
+If workers handle 580 concurrent but 290/s keep arriving:
+  queue grows when arrival > completion rate
+  → scale workers horizontally + priority queue for paid/contest tiers
+```
+
+**API bandwidth:**
+
+```text
+Submit payload       ≈ 10 KB code upload
+Peak upload          = 290 × 10 KB ≈ 2.9 MB/s — trivial
+Result JSON          ≈ 500 B; poll peak ≈ 2,900 × 500 B ≈ 1.5 MB/s
+```
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Avg QPS | Peak QPS | Notes |
+|-----------|------|---------|----------|-------|
+| Submit code | Write (enqueue) | ~58 | ~290 | Fast API; no execution here |
+| Poll submission status | Read | ~580 | ~2,900 | WebSocket reduces this |
+| Worker execute + write result | Write | ~58 | ~290 | 2 s each; needs ~580 concurrent workers |
+| Browse problems | Read | ~23 | ~115 | Cacheable catalog |
+| View submission history | Read | ~50 | ~250 | Paginated per user |
+
+**Ratio:** status **reads ~10× submit writes** on API; workers mirror submit rate but take seconds each.
+
+### What the numbers tell us
+
+- **Never run sandboxed code on the API server** — 290 submits/s × 2 s = 580 concurrent executions; queue + worker fleet is mandatory  
+- **~1,200 workers at contest peak** — auto-scale on queue depth, pre-warm before scheduled contests  
+- **18 TB/year of source code** → object storage + TTL; Postgres stores metadata only  
+- **360 GB/year of verdicts** → partition by `(user_id, month)` or `(problem_id, month)`  
+- **Polling (~2,900/s peak)** is wasteful — push results via WebSocket when job completes  
+- **Strong isolation** matters more than QPS — one escaped sandbox is catastrophic
+
+### Common mistake for this problem
+
+Sizing the **API tier** for execution load. The API handles ~290 QPS easily; **workers** need hundreds of concurrent sandboxes. Another mistake: **synchronous submit** (“wait 2 s and return verdict”) — timeouts and connection exhaustion kill this. Finally, storing **full stdout logs forever** in Postgres — offload to S3 with a summary row in DB.
 
 ## 4. High-Level Design (HLD)
 

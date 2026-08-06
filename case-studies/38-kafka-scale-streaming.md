@@ -43,33 +43,127 @@ The hard part is not appending to a log file — it is **coordination under cons
 
 ## 3. Back-of-the-envelope
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a Kafka cluster sizing worksheet. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day** (86,400 seconds in a day). Kafka-scale streaming is **append-heavy** with **partition count as the central tuning knob** — too few partitions starve consumers; too many cause rebalance storms.
 
-- 1 cluster, **200k partitions** active, avg **3 replicas**  
-- Average message **2 KB**; peak **10M msg/s**  
-- 7-day retention  
+### Why we estimate
+
+A Kafka-class log must sustain **millions of writes/sec** with **ordering per partition**. Estimates tell us:
+
+- Whether **disk append throughput** or **controller metadata** is the real bottleneck  
+- How **partition count** trades parallelism vs rebalance overhead  
+- Why **7-day retention at 10M msg/s** creates petabytes of storage  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Active partitions | 200K | Unit of parallelism and failure isolation |
+| Replicas per partition | 3 | Durability with acks=all |
+| Avg message size | 2 KB | Microservice events, click streams |
+| Peak write rate | 10M msg/s | Aggregate cluster throughput |
+| Retention | 7 days | Time-based; tiered to object store for older |
+| Consumer groups | 10K | Independent processing pipelines |
+| Avg consumers/group | 50 | 500K total consumer connections |
+| Brokers | 200 | Heavy cluster; design doc mentions up to 5K |
+
+### Step A — Traffic (QPS / throughput) with labeled arithmetic
+
+**Peak write throughput:**
 
 ```text
-Write throughput ≈ 10M × 2 KB = 20 GB/s ingress (peak)
-  → ~100 MB/s per broker if 200 brokers (heavy; need more brokers or compression)
-
-Storage (7 days):
-  10M/s × 2 KB × 86,400 × 7 ≈ 12 PB raw
-  With replication 3× ≈ 36 PB (tiered storage to object store for old segments)
-
-Per-partition limit ≈ 1–10 MB/s practical (sequential disk append)
-  10M msg/s / 2 KB ≈ if 1 MB/s/partition → need ~20k hot partitions at peak
-  → partition count is a capacity planning knob
-
-Consumer groups:
-  10k groups × avg 50 consumers = 500k consumer connections
-  Offset commits ≈ 500k / 5s batch ≈ 100k commits/s (metadata load)
-
-Controller events:
-  Broker failures ~ few/day at scale; partition leader elections ~ thousands of partitions affected per broker death
+Peak write rate   = 10,000,000 messages/second
+Bytes/s           = 10M × 2 KB = 20 GB/s ingress (peak)
 ```
 
-**Insight:** **Partitions are the unit of parallelism and the unit of failure isolation.** Too few partitions → cannot scale consumers; too many → metadata overhead and rebalance storms.
+**Per-broker write load (200 brokers):**
+
+```text
+20 GB/s ÷ 200 brokers ≈ 100 MB/s per broker
+  Heavy but feasible with sequential disk append + compression
+  → More brokers or compression if sustained above this
+```
+
+**Per-partition throughput limit:**
+
+```text
+Practical limit ≈ 1–10 MB/s per partition (sequential append)
+10M msg/s × 2 KB = 20 GB/s total
+At 1 MB/s/partition → need ~20,000 hot partitions at peak
+  → Partition count is a capacity planning knob
+```
+
+### Step B — Storage
+
+**7-day retention (raw, before replication):**
+
+```text
+10M msg/s × 2 KB × 86,400 s/day × 7 days
+  = 10M × 2 KB × 604,800
+  ≈ 12 PB raw
+
+With 3× replication ≈ 36 PB on disk
+  → Tiered storage: hot SSD for recent segments, object store for old
+```
+
+**Controller metadata load:**
+
+```text
+200K partitions × 3 replicas = 600K replica states to track
+Broker failure → leader election for ~thousands of partitions per dead broker
+  → KRaft/ZooKeeper must handle burst of metadata updates
+```
+
+### Step C — Bandwidth / other
+
+**Consumer offset commits:**
+
+```text
+500K consumer connections
+Batch commit every 5 s → 500K ÷ 5 ≈ 100,000 offset commits/second
+  → Metadata load on __consumer_offsets topic; batch aggressively
+```
+
+**Replication bandwidth per broker:**
+
+```text
+If broker leads 1,000 partitions at 1 MB/s each → 1 GB/s replication out
+  → Network NIC sizing matters; rack-aware replica placement reduces cross-rack traffic
+```
+
+**Rebalance cost:**
+
+```text
+Consumer group join/leave → partition reassignment
+Cooperative protocol target: stall < 5 s p99 during rolling deploy
+  → Too many partitions + too many consumers = rebalance storm
+```
+
+### Step D — Ratios and capacity table
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Peak write rate | 10M msg/s | Aggregate cluster |
+| Ingress bandwidth | 20 GB/s | 10M × 2 KB |
+| Per-broker write | ~100 MB/s | 200 brokers |
+| Per-partition limit | 1–10 MB/s | Sequential append bound |
+| Hot partitions needed | ~20K | At 1 MB/s/partition peak |
+| 7-day storage (raw) | ~12 PB | Before replication |
+| 7-day storage (3×) | ~36 PB | Tiered to object store |
+| Consumer connections | ~500K | 10K groups × 50 consumers |
+| Offset commits/s | ~100K | Batch every 5 s |
+
+### What the numbers tell us
+
+- **Partitions are the unit of parallelism AND failure isolation** — too few → can't scale consumers; too many → metadata + rebalance pain  
+- **20 GB/s ingress is heavy** → compression, more brokers, or higher per-partition throughput  
+- **36 PB with 3× replication over 7 days** → tiered storage mandatory; don't keep everything on broker SSD  
+- **100K offset commits/s** → batch consumer commits; don't commit per message  
+- **Broker death → thousands of leader elections** → KRaft controller must be fast; ISR min.insync.replicas=2  
+- **Exactly-once (EOS)** → idempotent producer + transactional consume-transform-produce; adds latency  
+
+### Common mistake for this problem
+
+Setting **too few partitions** and wondering why consumers can't keep up — 10M msg/s with 100 partitions = 100K msg/s/partition, far above the 1–10 MB/s practical limit. Interviewers want you to treat **partition count as a first-class capacity knob**. Another mistake: ignoring **rebalance storms** — 500K consumers across 10K groups means cooperative rebalancing and careful `max.poll.interval.ms` tuning are production requirements, not optional optimizations.
 
 ## 4. High-Level Design (HLD)
 

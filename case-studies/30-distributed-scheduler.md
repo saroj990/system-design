@@ -39,30 +39,158 @@ A single server's `crontab` fails when that server dies. You need **distributed 
 - Durable — schedules survive scheduler restarts  
 - At-least-once by default; exactly-once where configured  
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 operations/day**. Job triggers often **spike 2–3×** at minute boundaries (cron aligned to `:00`).
 
-- 1M registered schedules  
-- 50K jobs triggered per minute (≈ 833/s)  
-- Average job duration 30 seconds  
-- 500 worker processes  
+### Why we estimate
+
+A distributed scheduler splits **scheduling** (what runs when?) from **execution** (workers doing the work). Estimates tell us:
+
+- Whether the **scheduler tick** or **worker pool** is the bottleneck  
+- Why scanning 1M cron rules every second fails  
+- How **job history** explodes without TTL/archival
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Registered job schedules | 1M | Scheduler index size |
+| Jobs triggered per minute | 50K | Enqueue rate |
+| Average job duration | 30 seconds | Concurrent worker demand |
+| Worker processes | 500 | Execution capacity |
+| Job definition row size | ~500 B | Metadata DB |
+| Job run history retention | 30 days | Storage explosion risk |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Job triggers (scheduler → queue):**
 
 ```text
-Trigger rate ≈ 833 jobs/s peak → 2,500/s
+Triggers per minute  = 50,000
+Triggers per second  = 50,000 ÷ 60
+                     ≈ 833 jobs/second (average)
 
-Concurrent running jobs ≈ 833 × 30s ≈ 25,000 at steady state
-  (500 workers × ~50 concurrent threads = 25K capacity — tight, need more workers)
-
-Storage:
-  Job definitions: 1M × ~500B ≈ 500 MB
-  Job run history (30 days): 50K/min × 1440 × 30 ≈ 2.16B rows → need TTL/archival
-
-Scheduler tick: evaluate 1M cron rules — can't scan all every second
-  → bucket by next_run time or minute-level index
+Peak at minute boundary (3×) ≈ 833 × 3
+                             ≈ 2,500 triggers/second
 ```
 
-Insight: **separate scheduling from execution** — a lightweight scheduler enqueues due jobs; workers compete safely with leases.
+Many cron expressions fire at `:00` — **thundering herd** unless staggered.
+
+**One-off immediate jobs (API enqueue):**
+
+```text
+Assume 10K ad-hoc jobs/day
+Ad-hoc QPS (avg)     = 10,000 ÷ 86,400 ≈ 0.1/s — negligible vs scheduled
+```
+
+**Worker job completions (writes back to status store):**
+
+```text
+Completion rate (steady) ≈ trigger rate ≈ 833/s when system balanced
+Peak completions         ≈ 2,500/s
+```
+
+**Scheduler tick evaluation:**
+
+```text
+1M schedules — cannot scan all every second
+Bucket by next_run_at (minute-level index):
+  Schedules due this minute ≈ 50K → evaluate only those
+  Tick work per second      ≈ 50K ÷ 60 ≈ 833 evaluations/s — manageable with time-index
+```
+
+### Step B — Storage
+
+**Job definitions (Postgres/metadata DB):**
+
+```text
+Schedules           = 1M
+Row size            ≈ 500 B (cron expr, handler, payload, next_run, owner)
+
+Definition storage  = 1M × 500 B ≈ 500 MB — trivial
+Index on next_run_at for due-job queries
+```
+
+**Job run history (30 days — the danger zone):**
+
+```text
+Runs per day        = 50K/min × 1,440 min ≈ 72M runs/day
+Row size            ≈ 300 B (job_id, status, started_at, finished_at, error)
+
+30-day history      = 72M × 30 × 300 B ≈ 650 GB
+→ TTL after 30 days; archive to S3 cold storage or aggregate metrics only
+```
+
+**Queue (in-flight + pending):**
+
+```text
+Concurrent jobs (steady) ≈ arrival rate × duration
+                       = 833/s × 30 s
+                       ≈ 25,000 jobs in-flight
+
+Queue message size     ≈ 1 KB (job_id, payload, lease, retry_count)
+In-flight storage      ≈ 25K × 1 KB ≈ 25 MB in Redis/SQS — small
+```
+
+### Step C — Bandwidth and other resources
+
+**Worker capacity check:**
+
+```text
+Workers             = 500 processes
+Avg job duration    = 30 seconds
+Throughput/worker   = 1 job ÷ 30 s ≈ 0.033 jobs/s
+
+Cluster capacity    = 500 × 0.033
+                    ≈ 16.7 jobs/second sustained
+
+Required rate       ≈ 833 jobs/s at average
+→ **500 workers is far too few** for 30s jobs; need ~25,000 concurrent worker slots
+   OR average job duration is much lower for most jobs, OR 50K/min is peak not sustained
+```
+
+**Reconcile with assumption (honest interview move):**
+
+```text
+If 50K/min is peak burst and average is 5K/min ≈ 83/s:
+  Concurrent jobs = 83 × 30 ≈ 2,500 → 500 workers × 5 threads = 2,500 capacity ✓
+
+State the assumption: most minutes trigger ~5K jobs; 50K is peak minute
+```
+
+**Lease renewal traffic:**
+
+```text
+25K in-flight jobs, lease renew every 10s
+Renewal QPS         = 25,000 ÷ 10 ≈ 2,500 lease updates/s — Redis SET with TTL
+```
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Avg rate | Peak rate | Notes |
+|-----------|------|----------|-----------|-------|
+| Scheduler: find due jobs | Read | ~833/s | ~2,500/s | Time-indexed query |
+| Enqueue triggered job | Write | ~833/s | ~2,500/s | Push to queue |
+| Worker pull / lease job | Read+write | ~833/s | ~2,500/s | Competing consumers |
+| Update job status | Write | ~833/s | ~2,500/s | succeeded/failed |
+| Register/update schedule (API) | Write | ~1/s | ~10/s | Low admin traffic |
+| Query job history (UI) | Read | ~100/s | ~500/s | Paginated, indexed |
+
+**Ratio:** steady state **~1:1 enqueue to completion**; scheduler reads are bounded by indexing `next_run_at`, not full table scan.
+
+### What the numbers tell us
+
+- **Separate scheduler leader from workers** — scheduler enqueues; workers pull with leases  
+- **Index 1M schedules by `next_run_at`** — evaluate ~833/s due jobs, never scan 1M rows/sec  
+- **Stagger cron** — `:00` minute boundaries cause 2,500/s spikes; add random jitter  
+- **~650 GB for 30-day run history** — TTL, partition by day, archive old runs  
+- **Worker math: concurrent jobs = rate × duration** — 833/s × 30s = 25K slots needed at full load  
+- **Leases + heartbeat** — if worker dies, job returns to queue after lease expiry (avoid double-run for critical jobs with idempotency keys)
+
+### Common mistake for this problem
+
+**Scanning all 1M cron rules every second** — O(schedules) per tick doesn't scale. Use a **min-heap or time bucket index**. Another mistake: **no TTL on job history** — 72M rows/day becomes petabytes. Finally, ignoring **thundering herd** at minute zero — 50K jobs enqueued instantly overwhelms workers without jitter and backpressure.
 
 ## 4. High-Level Design (HLD)
 

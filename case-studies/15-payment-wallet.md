@@ -39,30 +39,138 @@ Users can top up a wallet, transfer money to other users or merchants, and view 
 
 ## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 operations/day**. Payment systems have **moderate QPS** compared to social feeds, but **zero tolerance for correctness errors** — one duplicate credit is worse than a slow response.
 
-- 50M wallets  
-- 10M transactions/day (transfers + merchant payments + top-ups)  
-- Average transaction $25  
+### Why we estimate
+
+Wallet systems are **ledger-first**. Estimates tell us:
+
+- Transaction volume is low enough for **single Postgres** early on  
+- **Ledger row growth** drives partitioning strategy (by month)  
+- **Read QPS** (balance checks, history) exceeds writes — but writes need **strong consistency**  
+- Only **~20% of txns** hit external payment gateway — most are internal transfers  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Wallets | 50M | One per user |
+| Transactions per day | 10M (transfers + merchant pay + top-ups) | Write volume |
+| Average transaction | $25 | Business context (not storage) |
+| Ledger entries per txn | 2 (debit + credit) | Double-entry bookkeeping |
+| Read:write ratio (balance/history) | 5:1 | Read scaling |
+| Top-ups share of txns | ~20% | External gateway load |
+| Row size (ledger entry) | ~200 B | Storage math |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Transaction write QPS:**
 
 ```text
-Transaction QPS ≈ 10M / 86400 ≈ 115/s avg, peak ~500/s
+Transactions/day    = 10,000,000
 
-Ledger rows:
-  10M/day × 365 × 2 entries (debit+credit) ≈ 7.3B rows/year
-  ~200B/row → ~1.5 TB/year (partition by month)
-
-Wallet balance reads:
-  5× write QPS for balance checks, history → ~2,500 read QPS peak
-
-Payment gateway:
-  Top-ups ~20% of txns → ~23/s to Stripe-like API
-
-Reconciliation:
-  Daily batch compare internal ledger vs gateway settlement files
+Average write QPS   = 10,000,000 ÷ 86,400
+                    ≈ 116 transactions/second
+                    ≈ 115/s (round)
 ```
 
-Insight: Treat this as a **ledger problem**, not "update balance column." Every money movement is an immutable **double-entry** record in one DB transaction.
+**Peak write QPS (rough 4–5× for pay-day spikes):**
+
+```text
+Peak write QPS ≈ 115 × 4 ≈ 460–500/s
+```
+
+**Balance / history read QPS:**
+
+```text
+Read QPS (avg)  = 115 × 5 ≈ 575/s
+Read QPS (peak) = 500 × 5 ≈ 2,500/s
+```
+
+**External payment gateway calls (top-ups only):**
+
+```text
+Top-up fraction    = 20%
+Top-up QPS (avg)   = 115 × 20% ≈ 23/s
+Top-up QPS (peak)  = 500 × 20% ≈ 100/s
+```
+
+Internal P2P and merchant payments **never leave** your ledger — no Stripe call.
+
+### Step B — Storage
+
+**Ledger entries per year:**
+
+```text
+Txns/day            = 10M
+Entries per txn     = 2 (debit + credit)
+
+Entries/day         = 10M × 2 = 20M entries/day
+Entries/year        = 20M × 365 ≈ 7.3 billion rows/year
+```
+
+**Disk per year:**
+
+```text
+Row size            ≈ 200 B
+Raw data/year       = 7.3B × 200 B ≈ 1.46 TB/year
+With indexes        ≈ 2 TB/year → partition by month, archive old partitions
+```
+
+**Wallet table:**
+
+```text
+50M wallets × ~100 B ≈ 5 GB — tiny; balance reads are cheap with proper indexes
+```
+
+### Step C — Bandwidth / other
+
+**API payload size:**
+
+```text
+Transfer request/response ≈ 500 B–1 KB — bandwidth is negligible
+```
+
+**Reconciliation (daily batch):**
+
+```text
+Compare ~2M top-up/withdraw rows/day against gateway settlement CSV
+Batch job, not real-time — runs off-peak
+```
+
+**Fraud velocity counters (Redis):**
+
+```text
+One INCR per txn per wallet per day → 10M keys/day with TTL
+Memory ≈ hundreds of MB — trivial
+```
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Peak QPS | Consistency |
+|-----------|------|----------|-------------|
+| P2P transfer / merchant pay | Write | ~400/s | Strong (ACID) |
+| Top-up / withdraw | Write | ~100/s external | Strong + async settlement |
+| Get balance | Read | ~2,500/s | Strong (same txn as write) |
+| Transaction history | Read | ~2,500/s | OK from replica |
+| Idempotency check | Read | ~500/s | Must be exact |
+| Reconciliation job | Batch read | Nightly | Compares ledger vs gateway |
+
+**Ratio:** **5:1 read:write** — use read replicas for history; **writes stay on primary** with row locks.
+
+### What the numbers tell us
+
+- **115–500 txn/s** fits **single Postgres** for years — sharding by `user_id` is a later problem  
+- **Double-entry ledger** (~7.3B rows/year) → immutable append-only entries; partition monthly  
+- **Never "read balance, write balance" without locking** — use `SELECT FOR UPDATE` in same transaction  
+- **Idempotency keys** on every mutating API — client retries are guaranteed at scale  
+- **Top-ups (~23/s avg)** go to Stripe; **internal transfers stay in DB** — different failure modes  
+- **Withdrawals are async** — debit ledger immediately, settle to bank via queue (1–3 days)  
+- **Reconciliation job** catches orphan gateway charges after crashes  
+
+### Common mistake for this problem
+
+Updating a **`balance_cents` column without a ledger entry**, or doing read-modify-write **without row locks**. Interviewers want **double-entry + single DB transaction + idempotency**. Another mistake: treating wallet balance as **eventually consistent** — money requires **strong consistency** on writes.
 
 ## 4. High-Level Design (HLD)
 

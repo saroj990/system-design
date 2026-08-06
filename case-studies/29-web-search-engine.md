@@ -35,29 +35,152 @@ This case study covers a **minimal but realistic** pipeline: crawler → indexer
 - Fault tolerance — crawler and indexer are distributed  
 - Storage efficiency — compression, sharding  
 
-## 3. Back-of-the-envelope
+## 3. Back-of-the-envelope estimates
 
-Assumptions (simplified Google-scale down):
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day**. Search peaks (breaking news, product launches) often hit **3–4× average** query rate.
 
-- 500M indexed pages  
-- Average page: 20 KB HTML, 5 KB extracted text  
-- Vocabulary: 10M unique terms after stemming  
-- 5B searches/day  
+### Why we estimate
+
+A search engine splits into **offline** (crawl + index — batch, huge storage) and **online** (query — low latency, in-memory). Estimates tell us:
+
+- Whether **query QPS** or **index size** drives architecture  
+- Why the **inverted index must live in RAM** (or SSD with hot shards)  
+- Minimum **crawl throughput** to keep 500M pages fresh
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Indexed web pages | 500M | Corpus size |
+| Average extracted text per page | 5 KB | Raw text + index input |
+| Average HTML fetched | 20 KB | Crawl bandwidth |
+| Unique vocabulary (terms) | 10M | Dictionary size |
+| Searches per day | 5B | Query path load |
+| Index refresh target | 30 days | Crawl rate floor |
+| Top results returned | 10 | Query response size |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Search queries (online path — latency critical):**
 
 ```text
-Raw text storage ≈ 500M × 5KB ≈ 2.5 TB (compressed ~750 GB)
+Searches per day    = 5 billion
+Query QPS (avg)     = 5B ÷ 86,400
+                    ≈ 58,000 queries/second
 
-Inverted index (rough):
-  10M terms × avg 50 KB postings each ≈ 500 GB (highly compressible with delta encoding)
-
-Query QPS ≈ 5B / 86400 ≈ 58,000/s avg, peak ~200,000/s
-
-Crawl rate:
-  To refresh 500M pages every 30 days → 500M / 30 / 86400 ≈ 190 pages/s minimum
-  Discovery + deep web → target ~1,000–10,000 pages/s cluster-wide
+Peak query QPS (3×) ≈ 58,000 × 3
+                    ≈ 174,000 queries/second
 ```
 
-Insight: **query path must hit in-memory index shards** — disk is for crawl store and backups, not hot search.
+Each query: tokenize → lookup postings lists → score → return top-10. Target **p99 < 300 ms**.
+
+**Crawl fetches (offline path — throughput critical):**
+
+```text
+Pages to refresh in 30 days = 500M
+Seconds in 30 days          = 30 × 86,400 = 2,592,000
+
+Minimum crawl QPS           = 500M ÷ 2,592,000
+                            ≈ 193 pages/second (steady refresh only)
+
+With discovery + dead links + deep web:
+Target crawl cluster        ≈ 1,000–10,000 pages/second
+```
+
+**Index build (batch jobs):**
+
+```text
+If re-indexing 500M pages daily (aggressive):
+  Indexer throughput needed ≈ 500M ÷ 86,400 ≈ 5,800 pages/second
+MVP: incremental indexing on crawl completion — thousands of docs/s per indexer shard
+```
+
+### Step B — Storage
+
+**Raw extracted text:**
+
+```text
+Text storage        = 500M pages × 5 KB/page
+                    ≈ 2.5 TB uncompressed
+Compressed (~3×)    ≈ 750 GB — S3/HDFS for crawl store
+```
+
+**Inverted index (postings lists):**
+
+```text
+Terms               = 10M unique
+Avg postings/term   ≈ 50 KB (doc IDs + frequencies, delta-encoded)
+
+Index size (rough)  = 10M × 50 KB ≈ 500 GB
+Compressed          ≈ 150–300 GB — must shard across index servers
+```
+
+**Document metadata (title, URL, PageRank, snippet):**
+
+```text
+500M docs × 500 B   ≈ 250 GB — colocated with index shards or separate KV store
+```
+
+**Link graph (for PageRank — offline):**
+
+```text
+Assume 50 links/page avg × 8 B = 400 B/page
+500M × 400 B        ≈ 200 GB — processed offline, not on query hot path
+```
+
+### Step C — Bandwidth and other resources
+
+**Crawl ingress (fetching web pages):**
+
+```text
+Crawl rate (target) = 5,000 pages/second
+Page size (avg)     = 20 KB HTML
+
+Crawl bandwidth     = 5,000 × 20 KB ≈ 100 MB/s ≈ 800 Mbps
+Peak with retries   ≈ 1–2 Gbps — politeness rate limits per domain cap this
+```
+
+**Query response egress:**
+
+```text
+Results payload     ≈ 10 results × 2 KB (title + URL + snippet) ≈ 20 KB
+Peak query QPS      ≈ 174,000/s
+
+Egress (if uncached) = 174,000 × 20 KB ≈ 3.5 GB/s — CDN for static assets; API JSON from query tier
+```
+
+**Index shard memory (query hot path):**
+
+```text
+500 GB index ÷ 20 shards ≈ 25 GB/shard
+Each shard serves   ≈ 174,000 ÷ 20 ≈ 8,700 QPS
+→ RAM or NVMe SSD with mmap; hot terms cached in memory
+```
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Avg rate | Peak rate | Notes |
+|-----------|------|----------|-----------|-------|
+| User search query | Read | ~58K QPS | ~174K QPS | **Sub-300 ms** |
+| Crawl page fetch | Write (store) | ~193–5K/s | ~10K/s | Politeness per domain |
+| Index update (incremental) | Write | ~1K docs/s | ~5K docs/s | Async from crawl pipeline |
+| PageRank (offline batch) | Read/write | N/A | Periodic | Not on query path |
+| Autocomplete (optional) | Read | ~10K QPS | ~40K QPS | Prefix index in Redis |
+
+**Ratio:** online path is **read-only at massive QPS**; offline crawl/index is **write-heavy but latency-forgiving**.
+
+### What the numbers tell us
+
+- **~174K query QPS peak** → shard inverted index by `term_hash` or `doc_id`; replicate hot shards  
+- **~500 GB inverted index** must sit on **index servers with RAM/NVMe** — disk-only query path is too slow  
+- **Crawl ~193 pages/s minimum** for 30-day refresh; real systems crawl 1K–10K/s with distributed frontier  
+- **750 GB compressed text** in object store — query path never reads raw HTML  
+- **Precompute PageRank offline** — store score in doc metadata; query-time scoring uses precomputed + BM25  
+- **Politeness** — rate limit per domain (1–2 req/s) → huge URL frontier queue, many crawler workers
+
+### Common mistake for this problem
+
+Scanning **500M documents linearly** per query. Inverted index lookup is O(postings for matched terms), not O(corpus). Another mistake: **crawling without politeness** — you get blocked and skew freshness. Finally, storing the **full index on spinning disk** for 174K QPS — hot shards need memory or SSD.
 
 ## 4. High-Level Design (HLD)
 

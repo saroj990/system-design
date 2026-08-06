@@ -35,23 +35,128 @@ A single Redis instance runs out of memory and becomes a bottleneck. You need a 
 
 ## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 operations/day**. Cache clusters measure **ops/sec**, not just bytes — **95% reads** at 200k ops/s is a very different design target than a write-heavy database.
 
-- 500 GB total cached data  
-- Average value size 1 KB → ~500M keys  
-- 200k ops/sec cluster-wide, 95% reads  
-- 3× replication for HA  
+### Why we estimate
+
+A distributed cache is **not a database** — it is an optional acceleration layer. Estimates tell us:
+
+- Total **RAM** needed including replication overhead  
+- Whether **single-node Redis** suffices vs **sharding into slots**  
+- Per-node **ops/s** vs network bandwidth  
+- When **replication** (3×) dominates cost  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Total cached data | 500 GB | Working set size |
+| Average value size | 1 KB | Key count derivation |
+| Cluster-wide ops/sec | 200,000/s | Throughput target |
+| Read ratio | 95% reads / 5% writes | Typical cache pattern |
+| Replication factor | 3× | HA — each primary + replicas |
+| Cluster nodes | 10 primaries (+ replicas) | Per-node math |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Cluster-wide operations:**
 
 ```text
-Raw data          ≈ 500 GB
-With 3 replicas   ≈ 1.5 TB RAM across cluster
-Per node (10 nodes) ≈ 150 GB RAM (+ overhead)
-
-Read QPS/node     ≈ 200k × 0.95 / 10 ≈ 19k/s  (well within single-node capability)
-Network           ≈ 200k × 1 KB avg × 8% writes ≈ 16 MB/s write payload (rough)
+Total ops/sec       = 200,000/s
+Read ops            = 200,000 × 95% = 190,000 reads/s
+Write ops           = 200,000 × 5%  = 10,000 writes/s
 ```
 
-Insight: **partition keys across nodes** (sharding) and **replicate each partition** for fault tolerance.
+**Per primary node (10 shards, ignoring replicas for throughput split):**
+
+```text
+Reads per node      = 190,000 ÷ 10 = 19,000 reads/s
+Writes per node     = 10,000 ÷ 10  = 1,000 writes/s
+Total per node      = 20,000 ops/s
+```
+
+Single Redis node handles **~100k+ ops/s** for simple GET/SET — 20k/node is comfortable; headroom for hot keys and replication lag.
+
+**Keys in cluster:**
+
+```text
+Total data          = 500 GB
+Avg value           = 1 KB
+
+Key count           = 500 GB ÷ 1 KB = 500,000,000 keys (~500M keys)
+Keys per node       = 500M ÷ 10 ≈ 50M keys/node
+```
+
+### Step B — Storage
+
+**Raw data:**
+
+```text
+Cached payload      = 500 GB
+```
+
+**With 3× replication (primary + 2 replicas per shard):**
+
+```text
+Total RAM           = 500 GB × 3 = 1,500 GB = 1.5 TB cluster-wide
+Per node (10 nodes) = 1.5 TB ÷ 10 ≈ 150 GB RAM/node (+ ~20% overhead for metadata, replication buffers)
+                    → plan ~180 GB RAM machines
+```
+
+**Overhead beyond raw values:**
+
+```text
+Key names, TTL structures, hash table overhead ≈ 10–30% extra
+Slot map + cluster gossip metadata is small (KB per node)
+```
+
+### Step C — Bandwidth
+
+**Write payload at cluster level:**
+
+```text
+Write ops           = 10,000/s
+Avg value           = 1 KB
+
+Write bandwidth     = 10,000 × 1 KB = 10 MB/s (primary → replication adds ~2× internal)
+```
+
+**Read payload (client-facing):**
+
+```text
+Read ops            = 190,000/s
+Avg value           = 1 KB
+
+Read egress         ≈ 190 MB/s cluster-wide (~19 MB/s per node)
+```
+
+Network is **not** the bottleneck at these sizes — **RAM capacity** and **hot key skew** are.
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Cluster QPS | Per-node QPS (10 shards) |
+|-----------|------|-------------|--------------------------|
+| GET | Read | 190,000/s | 19,000/s |
+| SET | Write | 10,000/s | 1,000/s |
+| DELETE | Write | Included in 5% | ~500/s |
+| Replication stream | Internal write | ~10,000/s × replicas | Async copy |
+| Slot migration | Internal | Rare | Burst during rebalance |
+
+**Ratio:** **95:5 read:write** — optimize for read latency; accept brief replication lag on writes.
+
+### What the numbers tell us
+
+- **500 GB exceeds single-node RAM** → shard into **10+ primaries** using fixed **16,384 slots**  
+- **3× replication** triples RAM cost (1.5 TB total) — non-negotiable for HA unless you accept data loss on crash  
+- **200k ops/s** is modest per node (19k/s) — cluster scales horizontally by **adding shards**, not bigger CPUs  
+- **Smart clients** must handle `MOVED`/`ASK` redirects during slot migration  
+- **Async replication** keeps writes fast; accept tiny loss window or use sync for critical keys only  
+- **Cache-aside pattern** in app layer — on miss, load from DB and populate with TTL  
+- **Hot keys** (celebrity user profile) need app-level splitting or local L1 cache — hashing won't help one key  
+
+### Common mistake for this problem
+
+Treating the cache as **source of truth** — if a node dies with async replication, un-replicated writes can vanish. The app must tolerate cache miss and **always fall back to DB**. Another mistake: **consistent hashing without fixed slots** — Redis Cluster's 16k slots enable **incremental migration**; naive ring rebalance moves too many keys at once.
 
 ## 4. High-Level Design (HLD)
 

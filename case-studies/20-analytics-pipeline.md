@@ -34,23 +34,154 @@ Product teams need answers like "how many signups per country yesterday?" and "f
 
 ## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 events/day**. Analytics pipelines ingest **fire-and-forget** traffic — peak **2–5×** average during product launches or viral moments.
 
-- 50M DAU, 20 events/user/day → 1B events/day  
-- Average event JSON 500 bytes  
-- Peak 3× average  
+### Why we estimate
+
+Event pipelines decouple **fast ingestion** from **slow analytics**. Estimates tell us:
+
+- Why you cannot write **1B events/day** directly to a dashboard database  
+- Kafka (or similar) **absorbs spikes** while processors lag safely  
+- **Raw storage** (TB/day) vs **rollup storage** (MB/day) drives tiering strategy  
+- **At-least-once** + `eventId` dedup beats chasing exactly-once everywhere  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Daily active users (DAU) | 50M | Event volume base |
+| Events per user per day | 20 | Page views, clicks, purchases |
+| Average event JSON size | 500 B | Kafka + lake sizing |
+| Peak multiplier | 3× average | Launch / viral traffic |
+| Compression ratio (Parquet) | ~5× | Cold storage |
+| Rollup granularity | Hourly | Dashboard query speed |
+| Raw retention (hot) | 7–90 days | Replay vs cost |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Daily event volume:**
 
 ```text
-Avg ingest     ≈ 1B / 86,400 ≈ 11,600 events/s
-Peak ingest    ≈ 35,000 events/s
-Daily volume   ≈ 1B × 500 B ≈ 500 GB/day raw
-Monthly raw    ≈ 15 TB (before compression)
+DAU                   = 50,000,000
+Events per user/day   = 20
 
-After compression (~5×) ≈ 3 TB/month in object storage
-Rollups (1M metric rows/day × 200 B) ≈ 200 MB/day — fits OLAP easily
+Daily events          = 50M × 20 = 1,000,000,000 events/day (1 billion)
 ```
 
-Insight: **decouple fast ingestion from slow analytics** with a durable queue/stream; **pre-aggregate** for dashboards, keep raw in cheap storage for drill-down.
+**Average ingestion QPS:**
+
+```text
+Average ingest QPS    = 1,000,000,000 ÷ 86,400
+                      ≈ 11,574 events/second
+                      ≈ 11,600/s (round)
+```
+
+**Peak ingestion QPS (3× average):**
+
+```text
+Peak ingest QPS       = 11,600 × 3 ≈ 34,800/s
+                      ≈ 35,000/s (round)
+```
+
+**Ingestion API batches (if clients send 10 events per POST):**
+
+```text
+Peak HTTP requests    = 35,000 ÷ 10 ≈ 3,500 POST/s to ingestion API
+(still must ack in < 100 ms p99 — produce to Kafka, don't process inline)
+```
+
+**Stream processor throughput:**
+
+Must sustain **≥ peak ingest** on consumer side; lag of minutes is OK for dashboards but not hours.
+
+### Step B — Storage
+
+**Raw events per day (uncompressed):**
+
+```text
+Events/day          = 1 billion
+Event size          = 500 B
+
+Daily raw volume    = 1B × 500 B = 500 GB/day
+Monthly raw         = 500 GB × 30 ≈ 15 TB/month (uncompressed)
+```
+
+**After Parquet compression (~5×):**
+
+```text
+Monthly in object lake ≈ 15 TB ÷ 5 ≈ 3 TB/month in S3
+Annual (if kept)       ≈ 36 TB compressed (tier older partitions to Glacier)
+```
+
+**Pre-aggregated rollups (OLAP):**
+
+```text
+Assume 1M unique (metric, dimension, hour) rows/day
+Row size            ≈ 200 B
+
+Rollup storage/day  = 1M × 200 B = 200 MB/day
+Yearly rollups      ≈ 73 GB — fits easily in ClickHouse/BigQuery hot tier
+```
+
+**Kafka retention (7 days buffer):**
+
+```text
+7 × 500 GB = 3.5 TB in Kafka (plan partition count + retention accordingly)
+```
+
+### Step C — Bandwidth
+
+**Ingestion ingress at peak:**
+
+```text
+Peak events         = 35,000/s
+Event size          = 500 B
+
+Ingress bandwidth   = 35,000 × 500 B = 17.5 MB/s
+                    (modest — network rarely the bottleneck; disk write speed to lake matters)
+```
+
+**Kafka → S3 lake write (batch flush):**
+
+```text
+Processors batch events into ~128 MB Parquet files
+Write throughput must keep up with 500 GB/day ≈ 5.8 MB/s average sustained
+```
+
+**Dashboard query egress:**
+
+```text
+Pre-aggregated queries return KB–MB JSON — negligible vs ingest
+```
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Rate | Notes |
+|-----------|------|------|-------|
+| Client → Ingestion API | Write | ~11.6k/s avg; ~35k/s peak | Fast 202 ack |
+| Kafka produce | Write | ~35k/s peak | Durable log |
+| Stream processor consume | Read | ~35k/s peak | Enrich + fork |
+| Parquet write to S3 | Write | ~5.8 MB/s avg | Batch sink |
+| OLAP rollup insert | Write | ~1M rows/day | Hourly windows |
+| Dashboard query | Read | Low QPS | Scans rollups, not raw |
+| Backfill replay | Read | Batch | Re-reads S3 Parquet |
+
+**Ratio on hot path:** **write-heavy** (ingest >> query). Analytics **reads** hit pre-aggregated tables, not 1B raw rows.
+
+### What the numbers tell us
+
+- **Ingestion API is stateless** — validate, assign `eventId`, produce to Kafka, return 202 in < 100 ms  
+- **Kafka decouples** 35k/s spikes from slow Flink/Spark processors  
+- **500 GB/day raw** → S3 data lake (Parquet), not OLTP database  
+- **Dashboards query rollups** (200 MB/day growth) — never full-scan 1B daily rows  
+- **At-least-once delivery** + **`eventId` dedup** in processor handles retries without double-counting  
+- **Partition by `hash(userId)`** for user-scoped ordering; salt hot keys to avoid celebrity skew  
+- **7-day Kafka + 90-day hot lake + Glacier** = sensible cost tiering  
+- Processing lag of **minutes** is acceptable for MVP dashboards  
+
+### Common mistake for this problem
+
+Writing events **directly into Postgres** or serving dashboards with **`SELECT COUNT(*) FROM events`** on the raw table. At 1B rows/day, that collapses in days. Correct pattern: **ingest → queue → process → lake + OLAP rollups**. Another mistake: insisting on **exactly-once end-to-end** — **at-least-once + idempotent `eventId`** is simpler and sufficient for product analytics.
 
 ## 4. High-Level Design (HLD)
 

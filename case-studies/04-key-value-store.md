@@ -20,11 +20,93 @@ Design a simplified **distributed key-value store** (think Redis/Dynamo basics).
 - High availability  
 - Tunable consistency (quorum)  
 
-## 3. Estimates
+## 3. Back-of-the-envelope estimates
 
-Billions of keys, value sizes from bytes to KB, hundreds of thousands of ops/sec.
+We do rough math so we know **what to optimize**. Exact precision is not the goal — **order of magnitude** is.
 
-Single machine won’t hold everything → partition + replicate.
+### Why we estimate (beginner tip)
+
+Ask three questions:
+1. **How busy?** → QPS (requests per second)
+2. **How much data?** → storage (GB/TB)
+3. **How fat is the pipe?** → bandwidth (MB/s) when media matters
+
+Cheat sheet: **1 QPS ≈ 86,400 requests/day**. Peak is often **2–5×** average.
+
+### Assumptions (say these out loud)
+
+- **10 billion keys** total in the cluster
+- Average value size **1 KB** (range: bytes to a few KB)
+- **500k operations/sec** at peak (GET + PUT + DELETE combined)
+- Read:write ratio ≈ **80:20** (reads dominate, like most caches/stores)
+- Replication factor **N = 3** (each key on 3 nodes)
+- Quorum: **W = 2** writes, **R = 2** reads
+
+### Step A — Traffic (QPS)
+
+```text
+Total peak ops:                    500,000/s
+
+Split by read:write (80:20):
+  Read QPS  ≈ 400,000/s
+  Write QPS ≈ 100,000/s
+
+Per node (assuming 100 nodes, even partition):
+  ~5,000 ops/s/node average
+  Hot keys can skew — use virtual nodes on consistent hash ring
+
+Replication write amplification:
+  Each PUT hits W=2 nodes → 100k logical writes ≈ 200k physical writes/s cluster-wide
+```
+
+### Step B — Storage
+
+```text
+Logical data:
+  10B keys × 1 KB avg value ≈ 10 TB
+
+With overhead (key names, version vectors, metadata +30%):
+  ≈ 13 TB logical
+
+Replication factor N=3:
+  13 TB × 3 replicas ≈ 39 TB total disk across cluster
+
+Per node (100 nodes):
+  ~390 GB/node — fits on modern SSDs; plan for compaction headroom
+```
+
+### Step C — Bandwidth / other (if relevant)
+
+Internal replication traffic on writes:
+
+```text
+100k writes/s × 1 KB value × (N-1) replica copies ≈ 200 MB/s inter-node replication
+
+Read egress to clients:
+  400k reads/s × 1 KB ≈ 400 MB/s — NIC and sharding matter at this scale
+```
+
+Not media-heavy, but **inter-node bandwidth** for replication and read repair is real.
+
+### Step D — Read:write ratio
+
+| Path | Approx share | Implication |
+|------|--------------|-------------|
+| **GET (read)** | ~80% | Quorum read from R=2 replicas; cache hot keys locally |
+| **PUT (write)** | ~15% | Write to W=2; async replicate to 3rd |
+| **DELETE** | ~5% | Tombstones + compaction; same replication rules |
+
+### What the numbers tell us
+
+- **10B keys, 10 TB logical** → no single machine holds everything; **consistent hashing** partitions keys across ~100 nodes
+- **500k peak ops/s** → in-memory memtable + append-only commit log (LSM) for write throughput
+- **N=3 replication** → survive 1 node failure; W+R > N gives strong consistency option
+- **Write amplification** from replication → budget 2–3× disk I/O vs naive single-copy
+- **Hot keys** break even partition — add virtual nodes and optional local cache on coordinators
+
+### Common mistake for this problem
+
+Trying to store **10 billion keys on one Redis/Postgres instance** because "we can add RAM later." At 10 TB + 500k ops/s, you must **partition early** and treat replication/quorum as first-class design choices.
 
 ## 4. HLD
 

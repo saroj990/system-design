@@ -45,34 +45,130 @@ Unlike a general database, the data set is **small** (MB–low GB), read/write r
 
 ## 3. Back-of-the-envelope
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not an etcd deployment guide. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day** (86,400 seconds in a day). Coordination services are **write-light, read-heavy** with occasional watch storms during config changes.
 
-- 5-node Raft cluster  
-- 2,000 clients, 5K write ops/s peak, 50K read ops/s peak  
-- Average key size 256 B; 500K keys total  
-- Watch fan-out: 10K active watches; 1K key changes/s peak  
+### Why we estimate
+
+A coordination service (etcd / ZooKeeper / Chubby) holds **small, critical metadata** — not your product data. Estimates tell us:
+
+- Whether **Raft consensus** or **watch fan-out** is the real bottleneck  
+- If **linearizable reads** on every GET are affordable or if **follower reads** are mandatory  
+- How much **storage** you actually need (usually tiny — the surprise is network and CPU)  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Raft cluster size | 5 nodes | Survives 2 failures; typical production size |
+| Connected clients | 2,000 | Each may hold watches and sessions |
+| Peak write ops/s | 5,000 | Every write goes through Raft leader |
+| Peak read ops/s | 50,000 | Most reads can use followers |
+| Total keys | 500,000 | Service registry, locks, config — stays small |
+| Avg key+value size | 256 B | Coordination data, not blobs |
+| Active watches | 10,000 | Clients waiting for key/prefix changes |
+| Peak key changes/s | 1,000 | Drives watch notification volume |
+
+### Step A — Traffic (QPS / throughput) with labeled arithmetic
+
+**Write throughput (consensus-bound):**
 
 ```text
-Storage ≈ 500K × 256 B ≈ 128 MB (+ Raft log overhead — tiny)
-
-Raft log append:
-  5K writes/s × ~500 B entry ≈ 2.5 MB/s
-  Snapshot every 10K entries → compact old log
-
-Read path (quorum read):
-  50K reads/s × 3 RTTs if linearizable → heavy
-  → follower reads + lease: most reads local, ~95% reduction in leader load
-
-Watch notifications:
-  1K changes/s × avg 10 watchers/key ≈ 10K events/s push
-  Batch + coalesce prefix watches
-
-Network between nodes:
-  Replication: 2.5 MB/s × 2 followers ≈ 5 MB/s (modest)
-  Leader election: rare; 1-2 s timeout typical
+Peak write QPS    = 5,000 ops/second
+  Every write → leader append → replicate to 4 followers → commit
+  This is the hard ceiling — etcd-class systems target ~10K writes/s per cluster
 ```
 
-Insight: **consensus on a small log** is the bottleneck — batch writes, snapshot aggressively, offer **consistent reads** via quorum or **bounded-staleness reads** from followers with leader lease verification.
+**Read throughput (can scale with followers):**
+
+```text
+Peak read QPS     = 50,000 ops/second
+
+If every read is linearizable (quorum read to leader + followers):
+  50K × 3 network RTTs → leader becomes read bottleneck
+
+With follower reads + leader lease verification:
+  ~95% of reads served locally → leader load drops to ~2,500 reads/s
+```
+
+**Watch notification rate:**
+
+```text
+Key changes/s     = 1,000/s (peak, e.g. rolling deploy updates service registry)
+Avg watchers/key  ≈ 10
+
+Notification events ≈ 1,000 × 10 = 10,000 events/s push to clients
+  → Must batch and coalesce prefix watches
+```
+
+### Step B — Storage
+
+**Key-value data (the actual metadata):**
+
+```text
+Total keys        = 500,000
+Bytes per key     ≈ 256 B (key + value + version metadata)
+
+KV storage        = 500K × 256 B ≈ 128 MB
+  (+ Raft log until snapshot — still small at coordination scale)
+```
+
+**Raft log (before compaction):**
+
+```text
+Write rate        = 5,000 entries/s
+Entry size        ≈ 500 B (key, value, term, index)
+
+Log append rate   = 5,000 × 500 B ≈ 2.5 MB/s
+
+Snapshot every 10K entries → compact old log; steady-state disk stays flat
+```
+
+### Step C — Bandwidth / other
+
+**Inter-node replication:**
+
+```text
+Leader → 4 followers: 2.5 MB/s × 2 (majority path) ≈ 5 MB/s replication bandwidth
+  Modest — coordination is not a bandwidth problem
+```
+
+**Leader election (rare but critical):**
+
+```text
+Leader failure    → election timeout 1–2 s → brief write unavailability
+  During partition: minority partition stops accepting writes (CP system)
+```
+
+**Session heartbeats:**
+
+```text
+2,000 clients × 1 heartbeat/5s ≈ 400 heartbeats/s
+  Keeps ephemeral keys alive; session expiry triggers delete + watch events
+```
+
+### Step D — Ratios and capacity table
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Read:write ratio | 10:1 | 50K reads vs 5K writes at peak |
+| KV storage | ~128 MB | Tiny — this is not a data lake |
+| Raft log append | ~2.5 MB/s | Consensus is the write bottleneck |
+| Watch events/s | ~10,000/s | Batch + coalesce to avoid client overload |
+| Replication bandwidth | ~5 MB/s | Modest between 5 nodes |
+| Write p99 target | < 10 ms LAN | Dominated by Raft round-trip |
+
+### What the numbers tell us
+
+- **128 MB of KV data is tiny** → coordination is about **consistency and watches**, not disk capacity  
+- **5K writes/s through one Raft leader** is the write ceiling → batch writes, avoid chatty lock renewals  
+- **50K reads/s requires follower reads** → linearizable quorum reads on every GET would crush the leader  
+- **10K watch events/s** → prefix watches + coalescing; naive per-key push doesn't scale  
+- **CP, not AP** → during network partition, minority side stops writes rather than serve stale locks  
+- **Leader election in 1–2 s** → clients must retry; fencing tokens protect against stale lock holders  
+
+### Common mistake for this problem
+
+Treating a coordination service like a **general-purpose database** and storing large payloads or running analytics queries. Interviewers want you to see that **consensus on a small log** is the bottleneck — keep values small, snapshot aggressively, and offer **bounded-staleness follower reads** instead of quorum reads on every GET. Another mistake: ignoring **watch fan-out** — 1,000 key changes/s × 10 watchers each is 10K push events/s.
 
 ## 4. High-Level Design (HLD)
 

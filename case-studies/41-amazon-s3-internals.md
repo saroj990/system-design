@@ -55,7 +55,157 @@ The paradox Andy Warfield highlights: HDDs keep getting **bigger** (capacity ↑
 
 ---
 
-## 3. The mental model — four fleets
+## 3. Back-of-the-envelope
+
+These numbers are **rough order-of-magnitude math** — not leaked AWS internal capacity plans. They synthesize **public ballpark figures** from Andy Warfield's FAST '23 talk and All Things Distributed posts. In interviews, the goal is to show you understand *why S3's architecture exists*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day** (86,400 seconds in a day). At S3's scale, **metadata and heat balance** matter more than raw disk capacity.
+
+### Why we estimate
+
+S3 stores **hundreds of trillions of objects** on **millions of disks** — a filesystem mental model fails immediately. Estimates tell us:
+
+- Why **HDD capacity grows faster than IOPS** forces shard-based architecture  
+- Whether **metadata indexing** or **request routing** is the real bottleneck  
+- Why **erasure coding** replaces naive 3× replication at planetary scale  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Objects stored | ~280T (recent public ballpark) | Flat namespace must partition |
+| Request rate | Tens of millions/sec aggregate | Frontend + routing fleet sizing |
+| Disks in fleet | Millions of HDDs | Continuous failure + repair |
+| Avg object size | ~4 MB (blended) | Many small + some large objects |
+| Logical data | ~1 EB+ | Order of magnitude from public reports |
+| Metadata per object | ~1 KB | Key, version, shard locations, checksum |
+| Durability target | 11 nines (99.999999999%) | Drives EC + continuous scrub |
+| EC ratio | ~1.4× (10+4) | vs 3× replication |
+
+### Step A — Traffic (QPS / throughput) with labeled arithmetic
+
+**Aggregate request rate (public ballpark):**
+
+```text
+Reported scale: "tens of millions of requests per second" aggregate
+Conservative modeling estimate: ~30M requests/second global
+
+Using the cheat sheet:
+  30M QPS × 86,400 s/day ≈ 2.6 trillion requests/day
+```
+
+**Split by operation type (typical object store ratio):**
+
+```text
+GET:PUT ratio ≈ 10:1 (read-heavy — websites, analytics, ML)
+
+If 30M total req/s:
+  ~27M GET/s + ~3M PUT/s (rough split)
+
+PUT ingest bandwidth (at 4 MB avg object):
+  3M PUT/s × 4 MB ≈ 12 TB/s global ingest (peak bursts higher)
+```
+
+**Per-disk IOPS constraint (the physics problem):**
+
+```text
+Modern HDD: ~100–120 random IOPS per disk
+Capacity per disk: ~12–20 TB (growing every year)
+
+More bytes per disk each year, same IOPS per disk
+  → S3 must spread load; one disk cannot serve many hot objects
+```
+
+### Step B — Storage
+
+**Logical data:**
+
+```text
+280T objects × 4 MB avg ≈ 1.1 EB logical (order of magnitude)
+  Public reports cite 100T–280T+ objects; data volume scales similarly
+```
+
+**With 3× replication (what S3 does NOT do for all data):**
+
+```text
+1.1 EB × 3 ≈ 3.3 EB disk — ruinously expensive at this scale
+```
+
+**With erasure coding (~1.4× overhead):**
+
+```text
+1.1 EB × 1.4 ≈ 1.5 EB on disk
+  + continuous background repair when drives fail
+  At millions of disks, thousands of drives fail weekly
+```
+
+**Metadata storage (the scaling bottleneck):**
+
+```text
+280T objects × 1 KB metadata ≈ 280 PB of metadata
+  → Separate namespace/metadata fleet; sharded by bucket+key hash
+  → Never co-locate name lookup with all bytes on one machine
+```
+
+**Disk fleet size:**
+
+```text
+1.5 EB ÷ 14 TB usable per drive ≈ 107,000 drives minimum
+Public: "millions of HDDs" → includes parity, spares, multiple copies of metadata, staging
+```
+
+### Step C — Bandwidth / other
+
+**Background repair fleet (always running):**
+
+```text
+If 0.1% of drives fail per week on 1M drives → 1,000 failures/week
+  Each failure triggers EC reconstruction across the storage fleet
+  Background fleet bandwidth often rivals frontend during repair storms
+```
+
+**Heat management (Warfield's key insight):**
+
+```text
+A viral video → millions of GET/s on one object
+One disk = ~100 IOPS → impossible to serve from single drive
+  → Spread shards across many disks; frontend caches hot tail
+  → "Heat" is a first-class operational metric, not an afterthought
+```
+
+**Strong consistency (since 2020):**
+
+```text
+New object PUT → subsequent GET must see it immediately
+  → Metadata quorum commit before ACK; not eventual for new writes
+```
+
+### Step D — Ratios and capacity table
+
+| Metric | Approximate scale | Notes |
+|--------|-------------------|-------|
+| Objects stored | ~280T | Public ballpark; grows yearly |
+| Aggregate req/s | ~30M/s | "Tens of millions+" per AWS |
+| GET:PUT ratio | ~10:1 | Read-heavy workload |
+| Logical data | ~1 EB+ | Blended avg object size |
+| EC disk overhead | ~1.4× | vs 3× for naive replication |
+| Metadata | ~280 PB | 280T × 1 KB — shard aggressively |
+| HDD fleet | Millions | Continuous failure + repair |
+| IOPS per HDD | ~100–120 | Flat for decades — the core constraint |
+| Durability | 11 nines | ~1 loss per 10B objects/year |
+
+### What the numbers tell us
+
+- **Separate name from bytes** — 280 PB metadata fleet vs storage fleet; never one machine for both  
+- **HDD IOPS flat, capacity grows** → shard every object across many disks; heat balance is continuous ops work  
+- **Erasure coding, not 3× replication** — saves ~50%+ disk vs replication at EB scale  
+- **Millions of disks × continuous failure** → background repair fleet is as critical as the frontend  
+- **Tens of millions req/s** → frontend fleet + partition routing service; not a single API server  
+- **Viral object = hotspot** → spread shards + edge cache; one disk cannot serve a trending video  
+
+### Common mistake for this problem
+
+Thinking of S3 as **"a big hard drive" or a filesystem** — no directories, no inode table on one machine, no POSIX locks. Interviewers want the **four-fleet model**: frontend (API), namespace/metadata (routing), storage (shards on disks), background (repair/tiering/rebalance). Another mistake: ignoring **heat** — at 100 IOPS/disk, a hot key must be spread across hundreds of drives, not cached on one fast server.
+
+### Mental model — four fleets
 
 At the whiteboard level (from Warfield), S3 looks “simple”:
 
@@ -75,7 +225,7 @@ flowchart LR
 | **Storage nodes** | Persist **shards** of object data on disk (not whole objects on one drive) |
 | **Background / data services** | Rebuild after failures, rebalance heat, lifecycle tiering, scrubbing |
 
-AWS “ships its org chart”: each box is many teams and many microservices with API contracts between them. That organizational modularity matches the software modularity.
+AWS “ships its org chart”: each box is many teams and many microservices with API contracts between them. That organizational modularity matches the software modularity. The estimates above explain *why* you need four fleets; the next section covers *how* they store so many files.
 
 ---
 

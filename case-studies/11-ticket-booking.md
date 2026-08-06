@@ -37,29 +37,128 @@ Users browse events, pick seats on a venue map, hold them briefly, pay, and rece
 
 ## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 requests/day** (86,400 seconds in a day). Traffic rarely stays flat; **peak is often 2–5× average**, and flash sales can spike far higher for minutes at a time.
 
-- 500 popular events/month; 1 hot event sells 20,000 seats in 10 minutes  
-- Average event: 5,000 seats, 80% sell-through  
-- Peak on-sale: 50,000 concurrent users on one event  
+### Why we estimate
+
+Ticket booking has two very different modes: **calm browsing** (read-heavy) and **on-sale chaos** (write-heavy contention on a tiny inventory). Estimates tell us:
+
+- Whether the **Inventory Service** or **Payment Service** is the real bottleneck  
+- If we need **Redis locks**, **sharding by event**, or a **virtual waiting room**  
+- How much **storage** seat rows and booking history actually need (usually smaller than people guess)
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Popular events per month | 500 | Steady catalog growth |
+| Hot event seat count | 20,000 seats sold in 10 minutes | Defines worst-case write burst |
+| Average event size | 5,000 seats, 80% sell-through | Typical storage and confirmation rate |
+| Peak concurrent users (one hot event) | 50,000 | Drives hold-attempt QPS |
+| Hold window | 10 minutes | Seats locked but not yet sold |
+| Seat click rate during on-sale | ~2 clicks/min per active user | Many clicks fail fast (seat taken) |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Confirmed bookings (successful writes to inventory):**
 
 ```text
-Hot event write QPS (hold attempts):
-  50,000 users × ~2 seat clicks/min ≈ 1,700 holds/s peak
-  (many will fail fast — seat already taken)
+Seats to sell     = 20,000 seats
+On-sale window    = 10 minutes = 600 seconds
 
-Confirmed bookings:
-  20,000 seats / 600 s ≈ 33 confirmations/s peak
-
-Storage (orders + seats):
-  500 events × 5,000 seats × ~200B ≈ 500MB seat rows
-  + bookings, payments → low TB scale for years
-
-Read QPS (browse, seat map):
-  10× write during on-sale → ~17,000 reads/s peak
+Peak confirm QPS  = 20,000 ÷ 600
+                  ≈ 33 confirmations/second
 ```
 
-Insight: **seat inventory writes** are the bottleneck, not payment. Optimize holds with fast in-memory locks + DB as source of truth.
+Even at peak, only ~33 seats/sec move from `HELD` → `SOLD`. Payment and confirmation are **not** the hottest path.
+
+**Hold attempts (users clicking seats — the real spike):**
+
+```text
+Concurrent users        = 50,000
+Clicks per user per min  = 2
+
+Hold attempt QPS        = (50,000 × 2) ÷ 60
+                        ≈ 1,700 holds/second (peak)
+```
+
+Most of these return **409 SEAT_UNAVAILABLE** quickly — but the server still must check atomically every time.
+
+**Browse / seat-map reads during on-sale:**
+
+```text
+Read:write ratio during on-sale ≈ 10:1 (users refreshing the map)
+
+Peak read QPS ≈ 1,700 × 10 ≈ 17,000 reads/second
+```
+
+**Steady-state (no flash sale):**
+
+```text
+500 events/month × 5,000 seats × 80% sold = 2M seats sold/month
+≈ 2M ÷ (30 × 86,400) ≈ 0.8 confirmations/s average
+
+Browse traffic between sales is much lower — flash sales dominate design.
+```
+
+### Step B — Storage
+
+**Seat inventory rows:**
+
+```text
+Rows            = 500 events × 5,000 seats = 2.5M seat rows
+Bytes per row   ≈ 200 B (IDs, status, price, version, timestamps)
+
+Seat data       = 2.5M × 200 B ≈ 500 MB
+```
+
+**Bookings, payments, tickets (1 year, rough):**
+
+```text
+Bookings/year   ≈ 2M seats × 12 months ≈ 24M booking rows (same order of magnitude)
+Row size        ≈ 300–500 B with indexes
+
+Year-1 total    ≈ tens of GB, not petabytes — seat contention matters more than disk
+```
+
+### Step C — Bandwidth
+
+**Seat map API responses (peak read path):**
+
+```text
+Seat map payload  ≈ 5,000 seats × ~50 B JSON ≈ 250 KB per full map fetch
+Peak read QPS    ≈ 17,000/s
+
+If every read fetched full map (worst case):
+  17,000 × 250 KB ≈ 4.25 GB/s  → unrealistic; CDN + section-level fetch + caching required
+```
+
+In practice, clients fetch **sections** or **cached snapshots**, not 17k full maps/sec. Bandwidth pushes you toward **CDN for static venue maps** and **incremental seat status updates**.
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Peak QPS (hot event) | Notes |
+|-----------|------|----------------------|-------|
+| View seat map / browse | Read | ~17,000/s | Poll or WebSocket updates |
+| Hold seat | Write | ~1,700/s | Must be atomic; Redis + DB |
+| Confirm after payment | Write | ~33/s | Idempotent; lower volume |
+| Payment charge | External write | ~33/s | Stripe-like API |
+| Hold expiry (worker) | Write | ~33/s | Releases timed-out holds |
+
+**Ratio during on-sale:** reads ~10× writes on inventory; **hold writes** dominate internal design.
+
+### What the numbers tell us
+
+- **Seat holds (~1,700/s peak), not payments (~33/s), are the bottleneck** → optimize Inventory Service with Redis `SET NX`, DB row locks, and sharding by `event_id`  
+- **Strong consistency is non-negotiable** for confirmed seats; failed holds can fail fast  
+- **10-minute holds** mean many seats sit in `HELD` during on-sale → expiry workers and TTL are first-class  
+- **17k read/s** on seat maps → cache per-event availability, section-level APIs, optional WebSocket for deltas  
+- **500 MB of seat rows** is tiny → the hard problem is **concurrency**, not storage  
+- At extreme scale, add a **virtual waiting room** to cap concurrent users below 50k on one event
+
+### Common mistake for this problem
+
+Treating **payment QPS** as the scaling bottleneck. Interviewers want you to see that **inventory contention** (many users, few seats) is the hard part. Another mistake: using **eventual consistency** for seat state — double-booking is unacceptable; use atomic holds + durable DB confirmation.
 
 ## 4. High-Level Design (HLD)
 

@@ -26,19 +26,85 @@ Store arbitrary text snippets, return a URL, allow public (or unlisted) reads, s
 - Read-heavy for viral pastes  
 - Durability of content until expiry  
 
-## 3. Estimates
+## 3. Back-of-the-envelope estimates
 
-Assume:
+We do rough math so we know **what to optimize**. Exact precision is not the goal — **order of magnitude** is.
 
-- 5M creates/day, 50M reads/day  
-- Average paste 10 KB, p99 = 1 MB  
+### Why we estimate (beginner tip)
+
+Ask three questions:
+1. **How busy?** → QPS (requests per second)
+2. **How much data?** → storage (GB/TB)
+3. **How fat is the pipe?** → bandwidth (MB/s) when media matters
+
+Cheat sheet: **1 QPS ≈ 86,400 requests/day**. Peak is often **2–5×** average.
+
+### Assumptions (say these out loud)
+
+- **5M new pastes per day** (writes)
+- **50M paste reads per day** (reads) → read:write ≈ **10:1**
+- Average paste body **10 KB**; occasional large pastes up to **1 MB** (p99)
+- Metadata row per paste ≈ **300 bytes** (id, owner, expiry, S3 key, etc.)
+- Pastes can go viral — a single paste might get millions of reads in hours
+
+### Step A — Traffic (QPS)
 
 ```text
-Write QPS ≈ 60, Read QPS ≈ 600 (peak reads thousands)
-Storage/year ≈ 5M × 365 × 10KB ≈ 18TB
+Write QPS (creates):
+  5M / day ÷ 86,400 seconds ≈ 58/s average
+  Peak (5× avg)                ≈ 290/s
+
+Read QPS:
+  50M / day ÷ 86,400 seconds ≈ 580/s average
+  Peak (5× avg, viral spike)   ≈ 3,000/s for a hot paste
+
+Read:write ratio ≈ 50M / 5M = 10:1
 ```
 
-Insight: **don’t store huge blobs only in OLTP DB** — use object storage for content, DB for metadata.
+### Step B — Storage
+
+```text
+Content (bodies) per year:
+  5M pastes/day × 365 days × 10 KB avg ≈ 18 TB/year
+
+Metadata in SQL:
+  5M × 365 × 300 bytes ≈ 550 GB/year (+ indexes → ~1 TB)
+
+Large pastes (1 MB) are rare but add tail risk — cap upload size (e.g. 10 MB) and reject abuse
+```
+
+### Step C — Bandwidth / other (if relevant)
+
+Serving a **10 KB** paste at 580 read QPS average:
+
+```text
+580/s × 10 KB ≈ 5.8 MB/s average egress from origin
+
+Viral paste (3,000 read QPS × 1 MB):
+  3,000 × 1 MB ≈ 3 GB/s — origin cannot handle this; CDN + cache required for hot pastes
+```
+
+Upload bandwidth at peak create (~290/s × 10 KB) ≈ **2.9 MB/s** — manageable.
+
+### Step D — Read:write ratio
+
+| Path | Approx share | Implication |
+|------|--------------|-------------|
+| **Read paste (GET)** | ~90% of API traffic | Cache hot bodies in Redis; CDN for large public pastes |
+| **Create paste (POST)** | ~10% | Write to S3 (or inline if tiny), metadata to DB |
+| **Delete / expiry** | Background | Async workers + S3 lifecycle rules |
+
+### What the numbers tell us
+
+- **~18 TB/year of content** → store bodies in **S3**, not Postgres BLOB columns
+- **Metadata ~1 TB/year** → SQL/NoSQL for rows is fine; index by `paste_id` and `expires_at`
+- **Small pastes (≤ 32 KB)** can live inline in DB for speed; larger ones go to S3
+- **Viral reads** need Redis cache (`paste:body:{id}`) with TTL capped by expiry time
+- **Expiry workers** must delete both metadata rows and S3 objects — plan for ~5M deletes/day at steady state
+
+### Common mistake for this problem
+
+Storing entire paste content inside the **OLTP database** because "it's simpler." At 18 TB/year, DB storage cost and backup time explode — split metadata (DB) from content (object storage) from day one.
 
 ## 4. HLD
 

@@ -34,23 +34,164 @@ Users store files in the cloud, edit on laptop, and expect phone to show the lat
 
 ## 3. Back-of-the-envelope estimates
 
-Assumptions:
+These numbers are **rough order-of-magnitude math** — not a capacity plan. In interviews, the goal is to show you know *what to count* and *which resource breaks first*. A useful shortcut: **1 QPS sustained ≈ 86,400 operations/day**. File sync adds **metadata ops** (cheap) and **blob transfer** (expensive) — count them separately.
 
-- 50M users, 200 files/user average → 10B file metadata records  
-- Average file 500 KB (many small docs + some large) → 5 PB logical user data  
-- Deduplication saves ~20% → ~4 PB unique blocks  
-- 10M uploads/day, 50M downloads/day  
+### Why we estimate
+
+Dropbox-like systems split **small metadata** from **large blobs**. Estimates tell us:
+
+- Why **10B file records** cannot live in one Postgres instance  
+- Why **object storage (S3)** holds petabytes while SQL holds gigabytes of metadata  
+- Upload vs download QPS shapes **different services**  
+- **Deduplication** changes unique storage, not metadata row count  
+
+### Assumptions
+
+| Assumption | Value | Why it matters |
+|------------|-------|----------------|
+| Users | 50M | Scale baseline |
+| Files per user (avg) | 200 | Metadata row count |
+| Average file size | 500 KB | Blob storage (docs + some large files) |
+| Dedup savings | ~20% | Unique blocks vs logical size |
+| Uploads per day | 10M | Write path |
+| Downloads per day | 50M | Read path (5:1 download:upload) |
+| Chunk size | 4 MB | Upload resume + dedup unit |
+| Metadata per file | ~500 B | DB sizing |
+
+### Step A — Traffic (QPS) with labeled arithmetic
+
+**Upload QPS:**
 
 ```text
-Upload QPS   ≈ 10M / 86,400 ≈ 115/s avg, peak ~600/s
-Download QPS ≈ 50M / 86,400 ≈ 580/s avg, peak ~3,000/s
+Uploads/day       = 10,000,000
 
-Metadata     ≈ 10B × 500 B ≈ 5 TB (needs sharding — too big for one DB)
-Block storage≈ 4 PB in object store (S3-like)
-Sync notify  ≈ 1 change/user/hour × 50M ≈ 14k events/s (peak higher)
+Average upload QPS = 10,000,000 ÷ 86,400
+                   ≈ 116 uploads/second
+                   ≈ 115/s (round)
+
+Peak upload QPS  ≈ 115 × 5 ≈ 575/s → round to ~600/s
 ```
 
-Insight: **separate metadata (small, relational) from blob storage (large, object store)**, and sync via **content-defined or fixed-size chunks**.
+**Download QPS:**
+
+```text
+Downloads/day     = 50,000,000
+
+Average download QPS = 50,000,000 ÷ 86,400
+                     ≈ 579/s
+                     ≈ 580/s (round)
+
+Peak download QPS  ≈ 580 × 5 ≈ 2,900/s → round to ~3,000/s
+```
+
+**Sync notification events:**
+
+```text
+Assume ~1 file change per user per hour (active subset):
+
+Active users (rough) ≈ 10M/day actively syncing
+Changes/day          ≈ 10M × 24 = 240M events/day (upper bound)
+
+Stated simpler estimate:
+  1 change/user/hour × 50M users ≈ 50M events/hour
+  ≈ 50,000,000 ÷ 3,600 ≈ 14,000 events/s (if all users active — peak)
+
+Realistic average lower — use ~14k/s as peak sync fan-out order of magnitude
+```
+
+**Chunk upload sub-ops (per file):**
+
+```text
+Avg file 500 KB ÷ 4 MB chunk ≈ 1 chunk per small file (many files are one chunk)
+600 uploads/s × ~1–3 chunk PUTs ≈ 600–1,800 chunk writes/s to object store
+```
+
+### Step B — Storage
+
+**File metadata records:**
+
+```text
+Users × files/user  = 50M × 200 = 10,000,000,000 file records (10B)
+
+Metadata per file   ≈ 500 B
+
+Metadata total      = 10B × 500 B = 5 TB
+                      → must shard by user_id (too big for one DB)
+```
+
+**Logical blob storage:**
+
+```text
+Total files         = 10B
+Avg size            = 500 KB
+
+Logical data        = 10B × 500 KB = 5 PB (petabytes)
+```
+
+**Unique blocks after dedup:**
+
+```text
+Dedup savings       = 20%
+Unique storage      = 5 PB × 80% = 4 PB in object storage (S3-like)
+```
+
+**Block registry:**
+
+```text
+One row per unique 4 MB chunk hash — far fewer rows than files if dedup works
+Ref counts per block track garbage collection
+```
+
+### Step C — Bandwidth
+
+**Download bandwidth (peak):**
+
+```text
+Peak download QPS = 3,000/s
+Avg file          = 500 KB
+
+Bandwidth         = 3,000 × 500 KB = 1.5 GB/s
+                    (large files stream in parallel chunks — CDN helps)
+```
+
+**Upload bandwidth (peak):**
+
+```text
+600 uploads/s × 500 KB ≈ 300 MB/s ingress
+```
+
+**Sync notifications (WebSocket/long-poll):**
+
+```text
+Small JSON payloads (~200 B) × 14k/s ≈ 2.8 MB/s — connection count (150k+) matters more than bytes
+```
+
+### Step D — Read:write ratio table
+
+| Operation | Type | Peak QPS | Backend |
+|-----------|------|----------|---------|
+| Download file / chunk | Read | ~3,000/s | Object storage + CDN |
+| Upload / commit file | Write | ~600/s | Object storage + metadata DB |
+| List directory | Read | High | Metadata DB + Redis cache |
+| Sync changes feed | Read | ~14k/s | Change log |
+| Block dedup check | Read | ~600–1,800/s | Block registry |
+| Delete (tombstone) | Write | Lower | Metadata + ref count decrement |
+
+**Ratio:** downloads **~5× uploads** by request count; bytes follow the same pattern.
+
+### What the numbers tell us
+
+- **Metadata (5 TB, 10B rows) in sharded SQL**; **bytes (4 PB) in object storage** — never mix them  
+- **Content-hash chunks** enable dedup, integrity checks, and resume-after-failure upload  
+- **Separate Upload and Download services** — different scaling and CDN placement  
+- **Change log + cursor** powers sync; WebSocket push beats polling at 14k events/s  
+- **Ref-counted blocks** + async GC — delete is metadata-first, bytes reclaimed later  
+- **600 upload/s peak** is modest; **3,000 download/s** benefits from CDN and signed URLs  
+- List-folder must be fast → **Redis cache** for hot directories  
+
+### Common mistake for this problem
+
+Storing **file bytes in Postgres or metadata DB**. At 4 PB, blobs belong in **S3** keyed by content hash. Another mistake: **full-file upload on every edit** — chunking + "check which chunks exist" (`POST /uploads/check`) saves bandwidth when only part of a file changed.
 
 ## 4. High-Level Design (HLD)
 
