@@ -322,8 +322,8 @@ Any server can handle any user — session data lives in **Redis** or the **data
 
 ```mermaid
 flowchart LR
-  Client -->|"HTTPS\n(encrypted)"| LB[Load Balancer\n(decrypts here)]
-  LB -->|"HTTP\n(plain, internal network)"| App1[App Server 1]
+  Client -->|"HTTPS (encrypted)"| LB["Load Balancer (decrypts here)"]
+  LB -->|"HTTP (plain, internal network)"| App1[App Server 1]
   LB -->|"HTTP"| App2[App Server 2]
 ```
 
