@@ -23,3 +23,11 @@ export function getCaseStudySlugs(): string[] {
     .map((file) => file.replace(/\.md$/, ''))
     .sort();
 }
+
+export function getThinkingSlugs(): string[] {
+  return fs
+    .readdirSync(path.join(root, 'thinking'))
+    .filter((file) => file.endsWith('.md'))
+    .map((file) => file.replace(/\.md$/, ''))
+    .sort();
+}

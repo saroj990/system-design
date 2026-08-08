@@ -32,12 +32,24 @@ Clarify → Estimate → Draw HLD → Detail LLD → Discuss trade-offs
 
 Skipping ahead to case studies without fundamentals usually creates confusion (why Redis? why a queue?).
 
+## How to think (before memorizing case studies)
+
+After fundamentals — and before binge-reading solutions — complete **Part 1.5 — How to think**:
+
+1. [The Thinking Loop](thinking/01-the-thinking-loop.md) — five questions for any prompt  
+2. [Pattern Choosers](thinking/02-pattern-choosers.md) — queue / cache / SQL / fan-out trees  
+3. [First 10 Minutes](thinking/03-first-10-minutes.md) — narrated interview scripts  
+4. [Practice Without Spoilers](thinking/04-practice-without-spoilers.md) — drill protocol + rubric  
+
+The goal is a repeatable method, not a catalog of diagrams.
+
 ## How to study each case study
 
-1. Cover the solution and try your own HLD for 10–15 minutes  
-2. Compare with the tutorial HLD  
-3. Read LLD carefully — APIs and tables are where interviews get specific  
-4. Note 2–3 trade-offs you would mention in an interview  
+1. Read **only** the problem + requirements  
+2. Run the Thinking Loop on paper for 10–15 minutes (see Part 1.5)  
+3. Uncover estimates + HLD and grade your reasoning (not box-for-box match)  
+4. Read LLD carefully — APIs and tables are where interviews get specific  
+5. Note 2–3 trade-offs + one failure mode you would mention  
 
 ## Interview tip
 

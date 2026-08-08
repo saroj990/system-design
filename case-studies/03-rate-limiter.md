@@ -2,6 +2,8 @@
 
 Design a **rate limiter** that protects APIs from abuse and overload.
 
+> **Practice first:** Stop after requirements, run the [Thinking Loop](../thinking/01-the-thinking-loop.md), then use [Pattern Choosers](../thinking/02-pattern-choosers.md) (sync path vs Redis counters). Grade with [Practice Without Spoilers](../thinking/04-practice-without-spoilers.md).
+
 ## 1. Problem
 
 Allow at most `N` requests per client per time window (e.g., 100 req/min/IP or per API key).
