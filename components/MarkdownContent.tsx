@@ -28,11 +28,15 @@ function resolveHref(href?: string, currentHref?: string): string {
     path = '/' + path;
   } else if (path.startsWith('fundamentals/')) {
     path = '/' + path;
+  } else if (path.startsWith('thinking/')) {
+    path = '/' + path;
   } else if (!path.includes('/') && currentHref) {
     if (currentHref.includes('/fundamentals/')) {
       path = `/fundamentals/${path}`;
     } else if (currentHref.includes('/case-studies/')) {
       path = `/case-studies/${path}`;
+    } else if (currentHref.includes('/thinking/')) {
+      path = `/thinking/${path}`;
     }
   }
 

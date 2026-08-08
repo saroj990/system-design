@@ -51,11 +51,21 @@ requirements → estimates → APIs → load balancing → databases → replica
 
 <div class="home-card">
 
+### Part 1.5 — How to think
+
+Stop memorizing diagrams. Learn a repeatable loop, pattern choosers, narrated first-10-minutes scripts, and a practice rubric — then use case studies as drills.
+
+[Start thinking →](thinking/01-the-thinking-loop.md)
+
+</div>
+
+<div class="home-card">
+
 ### Part 2 — Case studies
 
-Twenty common products, each designed end-to-end with the same template: problem, requirements, capacity math, component diagram, APIs, schema, algorithms, and scale evolution. **41 case studies** in total — including advanced senior-level designs and a deep Amazon S3 internals chapter. See the full catalog below.
+Forty-one products designed end-to-end with the same template: problem, requirements, capacity math, component diagram, APIs, schema, algorithms, and scale evolution — including advanced senior-level designs and a deep Amazon S3 internals chapter. See the full catalog below.
 
-Start with [URL Shortener](case-studies/01-url-shortener.md), then [Rate Limiter](case-studies/03-rate-limiter.md), then explore freely.
+**Practice first** (cover the HLD), then compare. Start with [URL Shortener](case-studies/01-url-shortener.md), then [Rate Limiter](case-studies/03-rate-limiter.md).
 
 [Browse case studies →](case-studies/01-url-shortener.md)
 
@@ -140,13 +150,15 @@ Start with these — they cover the patterns interviewers ask most often. Each i
 
 1. Read [How to use this course](how-to-use.md) — study habits and interview tips  
 2. Complete **Fundamentals 01–15** in order  
-3. Attempt each case study’s HLD yourself before reading the solution  
-4. Deep-read LLD for APIs, tables, and concurrency  
+3. Complete **[How to think](thinking/01-the-thinking-loop.md)** (Part 1.5) — loop, choosers, narrations, practice rubric  
+4. Attempt each case study’s HLD yourself before reading the solution  
+5. Deep-read LLD for APIs, tables, and concurrency  
 
 ## What you will practice
 
 ```text
 Clarify → Estimate → Draw HLD → Detail LLD → Name trade-offs
+(+ Thinking Loop: verb → hot path → shape → correctness → first break)
 ```
 
 Every case study trains the same loop so the method becomes automatic.

@@ -42,6 +42,15 @@ export const navigation: NavSection[] = [
     ],
   },
   {
+    title: 'Part 1.5 — How to think',
+    items: [
+      { title: '01. The Thinking Loop', href: '/thinking/01-the-thinking-loop' },
+      { title: '02. Pattern Choosers', href: '/thinking/02-pattern-choosers' },
+      { title: '03. First 10 Minutes', href: '/thinking/03-first-10-minutes' },
+      { title: '04. Practice Without Spoilers', href: '/thinking/04-practice-without-spoilers' },
+    ],
+  },
+  {
     title: 'Part 2 — Case Studies',
     items: [
       { title: '01. URL Shortener', href: '/case-studies/01-url-shortener' },

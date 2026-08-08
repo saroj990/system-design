@@ -2,6 +2,8 @@
 
 Design a **Twitter/X-like news feed**: users post short updates and see a personalized timeline of posts from people they follow.
 
+> **Practice first:** Cover estimates/HLD. Decide fan-out on write vs read with [Pattern Choosers](../thinking/02-pattern-choosers.md), then compare to [First 10 Minutes — Walkthrough C](../thinking/03-first-10-minutes.md).
+
 ## 1. Problem
 
 When a user opens the app, they expect a **chronological (or ranked) list of recent posts** from accounts they follow — without waiting several seconds. When someone they follow publishes a new post, followers should see it in their feed soon after.

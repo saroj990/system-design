@@ -2,6 +2,8 @@
 
 Design a **WhatsApp-like chat** system: one-to-one and small group messaging with near-real-time delivery, read receipts, and offline support.
 
+> **Practice first:** Sketch gateways + persistence yourself, then compare to [First 10 Minutes — Walkthrough B](../thinking/03-first-10-minutes.md). Rubric: [Practice Without Spoilers](../thinking/04-practice-without-spoilers.md).
+
 ## 1. Problem
 
 Users send text messages (and optionally images) to contacts or groups. Messages should **arrive within seconds** when both parties are online, and **sync reliably** when a user comes back online after being offline.

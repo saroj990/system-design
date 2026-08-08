@@ -2,6 +2,8 @@
 
 Design a service like **bit.ly**: turn long URLs into short links and redirect quickly.
 
+> **Practice first:** Read §§1–2 only, then run the [Thinking Loop](../thinking/01-the-thinking-loop.md) for 10–15 minutes before scrolling to estimates/HLD. Self-score with [Practice Without Spoilers](../thinking/04-practice-without-spoilers.md). Hear a sample narration in [First 10 Minutes — Walkthrough A](../thinking/03-first-10-minutes.md).
+
 ## 1. Problem
 
 Users paste a long URL and receive a short URL. Opening the short URL redirects to the original.

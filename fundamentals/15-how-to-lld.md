@@ -650,4 +650,6 @@ Entities define **what exists**. Schema defines **persistent shape**. API define
 
 ---
 
-**Next:** Start Part 2 → [Case Study 01: URL Shortener](../case-studies/01-url-shortener.md)
+**Next:** Before binge-reading solutions, learn the method → [The Thinking Loop](../thinking/01-the-thinking-loop.md)
+
+Then drill Part 2 → [Case Study 01: URL Shortener](../case-studies/01-url-shortener.md)
