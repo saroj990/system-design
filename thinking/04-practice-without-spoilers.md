@@ -2,7 +2,7 @@
 
 > **Goal:** Turn every case study into a thinking drill — not a reading binge.
 
-You already have 41 worked solutions. The skill unlock is **doing the blank work first**.
+You already have 43 worked solutions. The skill unlock is **doing the blank work first**.
 
 ---
 
@@ -96,7 +96,7 @@ I’d pick __ because __; I’d switch if __.
 
 ## Suggested drill order (beginner → stretch)
 
-Don’t march 01→41 in order on day one. Use this ladder:
+Don’t march 01→43 in order on day one. Use this ladder:
 
 ### Week ladder
 

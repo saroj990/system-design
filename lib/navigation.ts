@@ -99,6 +99,8 @@ export const navigation: NavSection[] = [
       { title: '39. Global DDoS Mitigation', href: '/case-studies/39-global-ddos-mitigation' },
       { title: '40. Email at Scale', href: '/case-studies/40-email-at-scale' },
       { title: '41. Amazon S3 Internals', href: '/case-studies/41-amazon-s3-internals' },
+      { title: '42. GitHub at Scale', href: '/case-studies/42-github-at-scale' },
+      { title: '43. Zomato / Food Delivery', href: '/case-studies/43-zomato-food-delivery' },
     ],
   },
 ];

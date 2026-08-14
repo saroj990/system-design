@@ -273,4 +273,4 @@ Give yourself 1 point each:
 
 ---
 
-**Next:** [Practice without spoilers](04-practice-without-spoilers.md) — how to use the 41 case studies as drills.
+**Next:** [Practice without spoilers](04-practice-without-spoilers.md) — how to use the 43 case studies as drills.

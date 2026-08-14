@@ -545,3 +545,4 @@ Amazon S3 stores “so many files” by refusing to put many files on one disk t
 - [Building and operating a pretty big storage system called S3](https://www.allthingsdistributed.com/2023/07/building-and-operating-a-pretty-big-storage-system.html) (Andy Warfield)  
 - [High Scalability — Behind AWS S3’s Massive Scale](https://highscalability.com/behind-aws-s3s-massive-scale/)  
 - Companion design exercise: [Case Study 37 — Exabyte Object Storage](37-exabyte-object-storage.md)
+- Next: [Case Study 42 — GitHub at Scale](42-github-at-scale.md)
