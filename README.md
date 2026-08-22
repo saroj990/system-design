@@ -4,7 +4,7 @@
 
 **[Open System Design Handbook →](https://system-design-iota-ten.vercel.app/)**
 
-Browse the full interactive course in your browser — 15 fundamentals, 43 case studies (advanced + S3 + GitHub + Zomato), HLD/LLD diagrams, dark mode, and prev/next navigation.
+Browse the full interactive course in your browser — 15 fundamentals, 44 case studies (advanced + S3 + GitHub + Zomato + flash sales), HLD/LLD diagrams, dark mode, and prev/next navigation.
 
 > **Live app:** [system-design-iota-ten.vercel.app](https://system-design-iota-ten.vercel.app/) · **GitHub:** [saroj990/system-design](https://github.com/saroj990/system-design)
 
@@ -17,8 +17,8 @@ A complete beginner-to-interview path for designing backend systems: clarify req
 
 <div class="home-hero-meta">
   <span>15 fundamentals</span>
-  <span>43 case studies</span>
-  <span>13 advanced</span>
+  <span>44 case studies</span>
+  <span>14 advanced</span>
   <span>HLD + LLD for every app</span>
   <span>Dark mode</span>
 </div>
@@ -63,7 +63,7 @@ Stop memorizing diagrams. Learn a repeatable loop, pattern choosers, narrated fi
 
 ### Part 2 — Case studies
 
-Forty-three products designed end-to-end with the same template: problem, requirements, capacity math, component diagram, APIs, schema, algorithms, and scale evolution — including advanced senior-level designs, Amazon S3 internals, GitHub at scale, and Zomato-style food delivery. See the full catalog below.
+Forty-four products designed end-to-end with the same template: problem, requirements, capacity math, component diagram, APIs, schema, algorithms, and scale evolution — including flash sales (Big Billion Days / Great Indian Festival), GitHub at scale, and Zomato-style delivery. See the full catalog below.
 
 **Practice first** (cover the HLD), then compare. Start with [URL Shortener](case-studies/01-url-shortener.md), then [Rate Limiter](case-studies/03-rate-limiter.md).
 
@@ -144,7 +144,7 @@ Start with these — they cover the patterns interviewers ask most often. Each i
 
 </div>
 
-<p class="home-case-more">See all 43 case studies in the catalog below, or jump to <a href="/case-studies/43-zomato-food-delivery">Zomato / Food Delivery</a>, <a href="/case-studies/42-github-at-scale">GitHub at Scale</a>, or <a href="/case-studies/41-amazon-s3-internals">Amazon S3 Internals</a>.</p>
+<p class="home-case-more">See all 44 case studies in the catalog below, or jump to <a href="/case-studies/44-flash-sale-big-billion-days">Flash Sale (BBD / GIF)</a>, <a href="/case-studies/43-zomato-food-delivery">Zomato</a>, or <a href="/case-studies/42-github-at-scale">GitHub at Scale</a>.</p>
 
 ## Learning path
 
@@ -198,7 +198,7 @@ Every case study trains the same loop so the method becomes automatic.
 | 29 | [Web Search Engine](case-studies/29-web-search-engine.md) | Inverted index, ranking |
 | 30 | [Distributed Scheduler](case-studies/30-distributed-scheduler.md) | Cron at scale, leases |
 
-### Advanced / difficult (31–43)
+### Advanced / difficult (31–44)
 
 | # | System | Focus |
 |---|--------|--------|
@@ -215,6 +215,7 @@ Every case study trains the same loop so the method becomes automatic.
 | 41 | [Amazon S3 Internals](case-studies/41-amazon-s3-internals.md) | How S3 stores trillions of files |
 | 42 | [GitHub at Scale](case-studies/42-github-at-scale.md) | Git packs, DGit, forks, LFS, Actions |
 | 43 | [Zomato / Food Delivery](case-studies/43-zomato-food-delivery.md) | Marketplace, geo, dispatch, lunch peaks |
+| 44 | [Flash Sale (BBD / GIF)](case-studies/44-flash-sale-big-billion-days.md) | Inventory, CDN, sale-night ops |
 
 ## Run & deploy
 

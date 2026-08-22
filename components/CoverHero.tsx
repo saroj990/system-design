@@ -20,7 +20,7 @@ const categories = [
   },
   {
     label: 'Advanced / difficult',
-    items: ['Order Matching', 'Distributed Coordination', 'Ad Aggregation', 'Active-Active DB', 'Saga Transactions', 'ML Recommendations', 'Exabyte Storage', 'Amazon S3 Internals', 'Kafka Streaming', 'DDoS Mitigation', 'Email at Scale', 'GitHub at Scale', 'Zomato Food Delivery'],
+    items: ['Order Matching', 'Distributed Coordination', 'Ad Aggregation', 'Active-Active DB', 'Saga Transactions', 'ML Recommendations', 'Exabyte Storage', 'Amazon S3 Internals', 'Kafka Streaming', 'DDoS Mitigation', 'Email at Scale', 'GitHub at Scale', 'Zomato Food Delivery', 'Flash Sale BBD/GIF'],
   },
 ];
 
