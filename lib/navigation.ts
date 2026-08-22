@@ -101,6 +101,7 @@ export const navigation: NavSection[] = [
       { title: '41. Amazon S3 Internals', href: '/case-studies/41-amazon-s3-internals' },
       { title: '42. GitHub at Scale', href: '/case-studies/42-github-at-scale' },
       { title: '43. Zomato / Food Delivery', href: '/case-studies/43-zomato-food-delivery' },
+      { title: '44. Flash Sale (BBD / GIF)', href: '/case-studies/44-flash-sale-big-billion-days' },
     ],
   },
 ];

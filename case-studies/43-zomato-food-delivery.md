@@ -517,3 +517,5 @@ Zomato-style delivery works when you:
 **Practice:** Draw `PAID → READY → RIDER_ASSIGNED` for a Delhi 1:15 pm order. What is stored in Redis vs MySQL vs Kafka at each arrow?
 
 **Previous:** [GitHub at Scale](42-github-at-scale.md) · **Also:** [Ride Sharing](10-ride-sharing.md), [E-commerce](16-ecommerce.md)
+
+**Next:** [Flash Sale — BBD / GIF](44-flash-sale-big-billion-days.md)
